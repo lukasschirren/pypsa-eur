@@ -357,5 +357,9 @@ if __name__ == "__main__":
         only_crossborder = snakemake.params.autarky["by_country"]
         enforce_autarky(n, only_crossborder=only_crossborder)
 
+    # Apply country-specific discount rates to all network components
+    from scripts._helpers_discount_rates import apply_country_discount_rates_to_network
+    apply_country_discount_rates_to_network(n, snakemake.params.costs)
+
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

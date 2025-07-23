@@ -21,6 +21,7 @@ from scripts._helpers import (
 )
 from scripts.add_electricity import sanitize_carriers
 from scripts.add_existing_baseyear import add_build_year_to_new_assets
+from scripts._helpers_discount_rates import get_country_discount_rates_series
 
 logger = logging.getLogger(__name__)
 
@@ -662,6 +663,10 @@ if __name__ == "__main__":
 
     # update heat pump efficiency
     update_heat_pump_efficiency(n=n, years=years)
+
+    # Apply country-specific discount rates to all network components (perfect foresight)
+    from scripts._helpers_discount_rates import apply_country_discount_rates_to_network
+    apply_country_discount_rates_to_network(n, snakemake.params.costs)
 
     # export network
     sanitize_custom_columns(n)

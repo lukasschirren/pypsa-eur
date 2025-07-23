@@ -34,6 +34,7 @@ from scripts.add_electricity import (
     sanitize_carriers,
     sanitize_locations,
 )
+from scripts._helpers_discount_rates import get_country_discount_rate
 from scripts.build_energy_totals import (
     build_co2_totals,
     build_eea_co2,
@@ -5855,6 +5856,14 @@ def add_enhanced_geothermal(
     lt = costs.at["geothermal", "lifetime"]
     FOM = costs.at["geothermal", "FOM"]
 
+    # Calculate country-specific discount rates for geothermal buses
+    # Extract country codes from bus names (first 2 characters)
+    bus_countries = pd.Series(spatial.geothermal_heat.nodes).str[:2]
+    country_discount_rates = {}
+    for bus, country in zip(spatial.geothermal_heat.nodes, bus_countries):
+        country_discount_rates[bus] = get_country_discount_rate(country, costs_config)
+    
+    # Use global discount rate for annuity calculation (can be modified per bus later)
     egs_annuity = calculate_annuity(lt, dr)
 
     # under egs optimism, the expected cost reductions also cover costs for ORC
@@ -5865,6 +5874,7 @@ def add_enhanced_geothermal(
     # The orc cost are attributed to a separate link representing the ORC.
     # also capital_cost conversion Euro/kW -> Euro/MW
 
+    # Calculate base capital cost using global discount rate (will be adjusted per country later)
     egs_potentials["capital_cost"] = (
         (egs_annuity + FOM / (1.0 + FOM))
         * (egs_potentials["CAPEX"] * 1e3 - orc_capex)
@@ -6468,5 +6478,9 @@ if __name__ == "__main__":
 
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+
+    # Apply country-specific discount rates to all network components (including sector-coupled)
+    from scripts._helpers_discount_rates import apply_country_discount_rates_to_network
+    apply_country_discount_rates_to_network(n, snakemake.params.costs)
 
     n.export_to_netcdf(snakemake.output[0])

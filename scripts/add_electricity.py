@@ -67,6 +67,7 @@ from scripts._helpers import (
     set_scenario_config,
     update_p_nom_max,
 )
+from scripts._helpers_discount_rates import get_country_discount_rate
 
 idx = pd.IndexSlice
 
@@ -210,7 +211,8 @@ def add_co2_emissions(n, costs, carriers):
 
 
 def load_costs(
-    cost_file: str, config: dict, max_hours: dict = None, nyears: float = 1.0
+    cost_file: str, config: dict, max_hours: dict = None, nyears: float = 1.0, 
+    country: str = None
 ) -> pd.DataFrame:
     """
     Load cost data from CSV and prepare it.
@@ -225,6 +227,8 @@ def load_costs(
         Dictionary specifying maximum hours for storage technologies
     nyears : float, optional
         Number of years for investment, by default 1.0
+    country : str, optional
+        ISO 2-letter country code for country-specific discount rates
 
     Returns
     -------
@@ -257,6 +261,12 @@ def load_costs(
             overwrites = pd.Series(overwrites)
             costs.loc[overwrites.index, attr] = overwrites
             logger.info(f"Overwriting {attr} with:\n{overwrites}")
+
+    # Apply country-specific discount rate if provided
+    if country is not None:
+        country_discount_rate = get_country_discount_rate(country, config)
+        costs["discount rate"] = country_discount_rate
+        logger.info(f"Using country-specific discount rate for {country}: {country_discount_rate:.1%}")
 
     annuity_factor = calculate_annuity(costs["lifetime"], costs["discount rate"])
     annuity_factor_fom = annuity_factor + costs["FOM"] / 100.0
@@ -1272,6 +1282,10 @@ if __name__ == "__main__":
     sanitize_carriers(n, snakemake.config)
     if "location" in n.buses:
         sanitize_locations(n)
+
+    # Apply country-specific discount rates to all network components
+    from scripts._helpers_discount_rates import apply_country_discount_rates_to_network
+    apply_country_discount_rates_to_network(n, params.costs)
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])
