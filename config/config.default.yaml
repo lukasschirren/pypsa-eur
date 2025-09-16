@@ -35,7 +35,7 @@ foresight: myopic
 # Wildcard docs in https://pypsa-eur.readthedocs.io/en/latest/wildcards.html
 scenario:
   clusters:
-  - 110
+  - 112 # minimum number of clusters is 112
   opts:
   - ''
   sector_opts:
