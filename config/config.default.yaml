@@ -16,8 +16,8 @@ remote:
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#run
 run:
-  prefix: ""
-  name: ""
+  prefix: "pypsa-uk"
+  name: "" # scenario name
   scenarios:
     enable: false
     file: config/scenarios.yaml
@@ -35,7 +35,7 @@ foresight: myopic
 # Wildcard docs in https://pypsa-eur.readthedocs.io/en/latest/wildcards.html
 scenario:
   clusters:
-  - 132
+  - 110
   opts:
   - ''
   sector_opts:
@@ -86,7 +86,7 @@ countries:
 - XK
 
 uk_settings:
-  remove_ireland: false # necessary for an analysis of GB only (IE needs to be included in 'countries')
+  uk_only: false # whether study is for UK only or for Europe including UK. If true, for data flow structure, IE needs to be listed in the countries above.
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#snapshots
 snapshots:

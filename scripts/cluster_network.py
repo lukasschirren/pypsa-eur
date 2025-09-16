@@ -97,6 +97,212 @@ GEO_CRS = "EPSG:4326"
 DISTANCE_CRS = "EPSG:3035"
 BUS_TOL = 500  # meters
 
+scotland_short = "GBM"
+north_west_short = "GBD"
+north_east_yorkshire_humber_short = ["GBC", "GBE"]
+east_midland_short = "GBF"
+west_midland_short = "GBG"
+east_short = "GBH"
+central_england_short = "GBJ1"
+south_east_short = "GBJ"
+south_west_short = "GBK"
+wales_cymru_short = "GBL"
+greater_london_short = "GBI"
+north_ireland_short = "GBN"
+
+dct1 = {"GB scotland": scotland_short, 
+        "GB north west": north_west_short, 
+        "GB north east yorkshire humber": north_east_yorkshire_humber_short, 
+        "GB east midland": east_midland_short, 
+        "GB west midland": west_midland_short, 
+        "GB east": east_short, 
+        "GB central england": central_england_short, 
+        "GB south east": south_east_short, 
+        "GB south west": south_west_short, 
+        "GB wales cymru": wales_cymru_short, 
+        "GB greater london": greater_london_short,
+        "GB north ireland": north_ireland_short}
+
+dct1_rev = {'GBM': 'GB scotland',
+                'GBD': 'GB north west',
+                'GBC': 'GB north east yorkshire humber',
+                'GBE': 'GB north east yorkshire humber',
+                'GBF': 'GB east midland',
+                'GBG': 'GB west midland',
+                'GBH': 'GB east',
+                'GBJ1': 'GB central england',
+                'GBJ': 'GB south east',
+                'GBK': 'GB south west',
+                'GBL': 'GB wales cymru',
+                'GBI': 'GB greater london',
+                'GBN': 'GB north ireland'}
+
+def create_neighbors_matrix(regions):
+    neighbors_dct = {}
+    for a in regions.admin.unique():
+
+        regions_a = regions.query("admin == @a")
+
+        neighbors_matrix = pd.DataFrame(columns = regions_a.index, 
+                                    index = regions_a.index)
+
+        for i in range(len(regions_a)):
+            for j in range(len(regions_a)):
+
+                if i != j:
+                    intersect_ij = regions_a.iloc[i].geometry.boundary.intersection(regions_a.iloc[j].geometry.boundary)
+
+                    if not intersect_ij.is_empty:
+                        neighbors_matrix.loc[regions_a.index[i], regions_a.index[j]] = 1
+
+        neighbors_dct[a] = neighbors_matrix
+
+    return neighbors_dct
+
+def collect_small_regions(regions, neighbors_dct):
+
+    regions_merge = regions.copy()
+
+    indices_dropped = []
+
+    for c in regions_merge.index:
+
+        if c in regions_merge.index:
+
+            neighbors_dct_c = neighbors_dct[regions_merge.loc[c, "admin"]]
+
+            if regions_merge.loc[c, "colors"] == 1:
+
+                c_neighbors = neighbors_dct_c.loc[c].dropna()
+
+                c_neighbors_index = c_neighbors.index[c_neighbors.index.isin(regions_merge.index)]
+
+                regions_neighbors = regions_merge.loc[c_neighbors_index]
+
+                # only consider neighbors that are also small in size:
+                regions_neighbors_small = regions_neighbors.query("colors == 1")
+
+                if not regions_neighbors_small.empty:
+                    # add c to the list of neighbors:
+                    regions_neighbors_c = pd.concat([regions_neighbors_small, pd.DataFrame(regions_merge.loc[c]).T])
+
+                else:
+                    # if no small neighbors, then merge to the largest of the large neighbors:
+                    # add c to the list of neighbors:
+                    regions_neighbors_c = pd.concat([regions_neighbors, pd.DataFrame(regions_merge.loc[c]).T])
+
+                # largest region in the group of large/small neighbors:
+                largest = regions_neighbors_c["size"].idxmax()
+
+                # substations
+                substations = regions_neighbors_c["substations"].sum()
+
+                # if one region has already been merged, then drop it:
+                regions_to_merge = regions_neighbors_c.loc[~regions_neighbors_c.index.isin(indices_dropped)]
+
+                if not regions_to_merge.empty:
+
+                    indices_to_drop = list(regions_to_merge.index.values)
+
+                    regions_merge.loc[regions_to_merge.index, "admin1"] = largest
+                    regions_merge.loc[regions_to_merge.index, "substations"] = substations
+
+                    indices_dropped += indices_to_drop
+
+        else:
+            if c in indices_dropped:
+                continue
+            else:
+                raise ValueError(c, "Region not found")
+
+    # sanity check
+    if regions_merge.query("colors == 1").loc[regions_merge.query("colors == 1")["admin1"].isna()].empty:
+        print("All small regions merged - sanity check passed!")
+    else:
+        raise ValueError("Some small regions not merged - sanity check 2/2 failed!")
+
+    regions_merge.loc[regions_merge.query("colors == 0").index, "admin1"] = regions_merge.query("colors == 0").index
+
+    no_reduced = len(regions.index) - len(regions_merge["admin1"].unique())
+    print(no_reduced, "regions reduced after merging small regions")
+
+    return regions_merge
+
+def merge_small_regions(regions, regions_post, neighbors_dct):
+
+    logger.info(f"Regions after first merging step: {regions_post['admin1'].unique()}")
+    
+    for a1 in regions_post["admin1"].unique():
+        regions_post_a1 = regions_post.query("admin1 == @a1")
+
+        if len(regions_post_a1) > 1:
+            index_to_drop = regions_post_a1.index
+
+            regions_post_a1_merged = regions_post_a1.dissolve()
+            regions_post_a1_merged.index = [a1]
+            regions_post_a1_merged["colors"] = 0
+
+            regions_post.drop(index=index_to_drop, inplace=True)
+
+            regions_post = pd.concat([regions_post, regions_post_a1_merged])
+
+        elif len(regions_post_a1) == 1 and regions_post_a1["colors"].values[0] == 1:
+
+            number_of_small_neighbors = regions.loc[neighbors_dct[dct1_rev[a1[0:3]]].loc[a1].dropna().index]["colors"].sum()
+
+            if number_of_small_neighbors > 0:
+                print(f"Region {a1} is small, it has {number_of_small_neighbors} small neighbors, and was for some reason not merged.")
+
+        else:
+            continue
+
+    return regions_post
+
+def aggregate_small_admin_subregions(admin_shapes_all, country = "GB"):
+
+    admin_shapes_all = admin_shapes_all.to_crs(epsg=3035)
+
+    admin_shapes = admin_shapes_all.query("country == @country")
+    admin_shapes_c_index = admin_shapes.index
+
+    # add color column for small (1) and large (0) regions
+    admin_shapes_size = admin_shapes.geometry.area / 1e6 # km2
+    admin_shapes["size"] = admin_shapes_size
+
+    area_threshold = 1000 # km2
+    admin_shapes_size.loc[admin_shapes_size < area_threshold] = 1
+    admin_shapes_size.loc[admin_shapes_size > area_threshold] = 0
+
+    admin_shapes["colors"] = admin_shapes_size
+
+    for key, value in dct1.items():
+        
+        if type(value) == str:
+            admin_key = admin_shapes.loc[admin_shapes.index.str.startswith(value)]
+        else:
+            admin_key = admin_shapes.loc[admin_shapes.index.str.startswith(value[0]) | admin_shapes.index.str.contains(value[1])]
+
+        admin_shapes.loc[admin_key.index, "admin"] = key
+
+    # create neighbor matrix
+    neighbors_dct = create_neighbors_matrix(admin_shapes)
+
+    # collect all adjacent small regions 
+    regions_uk_post = collect_small_regions(admin_shapes, neighbors_dct)
+
+    # merge small neighboring regions
+    regions_uk_post_merged = merge_small_regions(admin_shapes, regions_uk_post, neighbors_dct)
+
+    regions_uk_post_merged.drop(columns=["size", "colors","admin", "admin1"], inplace=True)
+
+    # drop indices for country
+    admin_shapes_all.drop(admin_shapes_c_index, inplace=True)
+
+    # add new admin regions for country
+    admin_shapes_all = pd.concat([admin_shapes_all, regions_uk_post_merged])
+
+    return admin_shapes_all
+
 def group_clusters(n, country):
     """
     Group the buses in a country to one bus.
@@ -551,6 +757,15 @@ def busmap_for_admin_regions(
         busmap (pd.Series): Busmap mapping each bus to an administrative region.
     """
     admin_regions = gpd.read_file(admin_shapes)
+
+    admin_regions = admin_regions.set_index("admin")
+
+    admin_regions = aggregate_small_admin_subregions(admin_regions, country = "GB")
+
+    admin_regions = admin_regions.reset_index().rename(columns={"index": "admin"})
+    
+    # overwrite admin_shapes file
+    admin_regions.to_file(admin_shapes, driver="GeoJSON")
 
     level = administrative.get("level", 0)
     logger.info(f"Clustering at administrative level {level}.")
