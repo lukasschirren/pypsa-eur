@@ -158,17 +158,24 @@ def define_spatial(nodes, options):
 
     spatial.methanol = SimpleNamespace()
 
-    spatial.methanol.nodes = ["EU methanol"]
-    spatial.methanol.locations = ["EU"]
-
-    if options["methanol"]["regional_methanol_demand"]:
+    if options["methanol"]["transport"]:
+        spatial.methanol.nodes = nodes + " methanol"
+        spatial.methanol.locations = nodes
         spatial.methanol.demand_locations = nodes
         spatial.methanol.industry = nodes + " industry methanol"
         spatial.methanol.shipping = nodes + " shipping methanol"
     else:
-        spatial.methanol.demand_locations = ["EU"]
-        spatial.methanol.shipping = ["EU shipping methanol"]
-        spatial.methanol.industry = ["EU industry methanol"]
+        spatial.methanol.nodes = ["EU methanol"]
+        spatial.methanol.locations = ["EU"]
+        spatial.methanol.shipping = "EU shipping methanol"
+        if options["methanol"]["regional_methanol_demand"]:
+            spatial.methanol.demand_locations = nodes
+            spatial.methanol.industry = nodes + " industry methanol"
+        else:
+            spatial.methanol.demand_locations = ["EU"]
+            spatial.methanol.industry = ["EU industry methanol"]
+
+    spatial.methanol.df = pd.DataFrame(vars(spatial.methanol), index=nodes)
 
     # oil
     spatial.oil = SimpleNamespace()
@@ -643,7 +650,17 @@ def add_carrier_buses(
             carrier=carrier + suffix,
             marginal_cost=costs.at[carrier, "fuel"],
         )
-
+    
+    elif carrier == 'uranium':
+        suffix = ""
+        n.add(
+            "Generator",
+            nodes + suffix,
+            bus=nodes + suffix,
+            p_nom_extendable=True,
+            carrier=carrier + suffix,
+            marginal_cost=costs.at[carrier, "fuel"],
+            )
 
 # TODO: PyPSA-Eur merge issue
 def remove_elec_base_techs(n: pypsa.Network, carriers_to_keep: dict) -> None:

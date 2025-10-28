@@ -404,7 +404,6 @@ pypsa_eur:
   - solar-hsat
   - solar
   - ror
-  - nuclear
   StorageUnit:
   - PHS
   - hydro
@@ -946,6 +945,25 @@ costs:
     enable: false
     co2: 0.
     co2_monthly_prices: false
+    # Regional emission pricing settings
+    regional_prices:
+      enable: false
+      # Regional static prices (EUR/t CO2)
+      # Example configuration:
+      # prices:
+      #   DE: 
+      #     co2: 60.0
+      #   FR:
+      #     co2: 45.0
+      #   ES:
+      #     co2: 50.0
+      prices: {}
+      # Regional time-varying prices (paths to CSV files)
+      # Example configuration:
+      # monthly_prices_files:
+      #   DE: "data/co2_prices_de_monthly.csv"
+      #   FR: "data/co2_prices_fr_monthly.csv"
+      monthly_prices_files: {}
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#clustering
 clustering:
