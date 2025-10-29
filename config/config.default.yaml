@@ -29,7 +29,7 @@ run:
   use_shadow_directory: false
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#foresight
-foresight: overnight
+foresight: myopic
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#scenario
 # Wildcard docs in https://pypsa-eur.readthedocs.io/en/latest/wildcards.html
@@ -105,6 +105,14 @@ co2_budget:
   2045: 0.050
   2050: 0.000 # climate-neutral by 2050
 
+# Local CO2 budgets for specific countries (optional)
+# Example usage:
+# local_co2:
+#   DE:
+#     2025: 0.63
+#     2030: 0.50
+local_co2: false
+
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#electricity
 electricity:
   voltages: [220., 300., 330., 380., 400., 500., 750.]
@@ -127,7 +135,7 @@ electricity:
     H2: 168
 
   extendable_carriers:
-    Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT]
+    Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
     StorageUnit: [] # battery, H2
     Store: [battery, H2]
     Link: [] # H2 pipeline
@@ -136,7 +144,7 @@ electricity:
   custom_powerplants: false
   everywhere_powerplants: []
 
-  conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass]
+  conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass, uranium]
   renewable_carriers: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, hydro]
 
   estimate_renewable_capacities:
