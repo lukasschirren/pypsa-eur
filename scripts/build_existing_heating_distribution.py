@@ -61,10 +61,11 @@ def build_existing_heating():
         snakemake.input.existing_heating, index_col=0, header=0
     )
 
-    # data for Albania, Montenegro and Macedonia not included in database
+    # data for Albania, Montenegro, Macedonia and Ukraine not included in database
     existing_heating.loc["Albania"] = np.nan
     existing_heating.loc["Montenegro"] = np.nan
     existing_heating.loc["Macedonia"] = np.nan
+    existing_heating.loc["Ukraine"] = np.nan
 
     existing_heating.fillna(0.0, inplace=True)
 

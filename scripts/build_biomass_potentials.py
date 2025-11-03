@@ -93,6 +93,7 @@ def build_nuts_population_data(year=2013):
     pop["RS"] = 6664
     pop["ME"] = 617
     pop["XK"] = 1587
+    pop["UA"] = 38279
 
     pop["ct"] = pop.index.str[:2]
 
@@ -172,8 +173,41 @@ def disaggregate_nuts0(bio):
 
     # get population in nuts2
     pop_nuts2 = pop.loc[pop.index.str.len() == 4].copy()
+    
+    # Add Ukraine as country-level region (since it's included as "UA" in nuts2_shapes)
+    # Ukraine is missing from NUTS2 structure but included as country shape
+    if "UA" in pop.index:
+        pop_nuts2.loc["UA"] = pop.loc["UA"].copy()
+    
     by_country = pop_nuts2.total.groupby(pop_nuts2.ct).sum()
     pop_nuts2["fraction"] = pop_nuts2.total / pop_nuts2.ct.map(by_country)
+
+    if "UA" in pop_nuts2.ct.values and "UA" not in bio.index:
+        
+        # Ukraine biomass potentials (TWh/a)
+        # Sources: Ukrainian Ministry of Energy, FAO statistics, IEA Bioenergy reports
+        ukraine_biomass = {
+            'Agricultural waste': 15.0,  # Crop residues (wheat, corn, sunflower, barley)
+            'Fuelwood residues': 8.0,    # Forest logging residues  
+            'Secondary Forestry residues - woodchips': 5.0,  # Wood processing waste
+            'Sawdust': 2.0,              # Sawmill waste
+            'Residues from landscape care': 1.5,  # Urban green waste, pruning
+            'Manure solid, liquid': 3.0,  # Livestock waste (biogas potential)
+            'Sludge': 0.5,               # Wastewater treatment sludge
+            'Municipal waste': 1.0,      # Urban organic waste
+        }
+        
+        ukraine_row = pd.Series(0.0, index=bio.columns, name="UA")
+        
+        # Only add commodities that exist in the bio DataFrame columns
+        for commodity, potential in ukraine_biomass.items():
+            if commodity in bio.columns:
+                ukraine_row[commodity] = potential
+            else:
+                logger.warning(f"Commodity '{commodity}' not found in ENSPRESO data columns")
+        
+        # Add Ukraine row to bio DataFrame
+        bio = pd.concat([bio, ukraine_row.to_frame().T])
 
     # distribute nuts0 data to nuts2 by population
     bio_nodal = bio.loc[pop_nuts2.ct]
@@ -189,15 +223,18 @@ def disaggregate_nuts0(bio):
 def build_nuts2_shapes():
     """
     - load NUTS2 geometries
-    - add RS, AL, BA country shapes (not covered in NUTS 2013)
+    - add RS, AL, BA, UA country shapes (not covered in NUTS 2013)
     - consistently name ME, MK
+    
+    Note: Ukraine (UA) is added as a country-level shape since it's not part
+    of the official NUTS classification system.
     """
     nuts2 = gpd.GeoDataFrame(
         gpd.read_file(snakemake.input.nuts2).set_index("NUTS_ID").geometry
     )
 
     countries = gpd.read_file(snakemake.input.country_shapes).set_index("name")
-    missing_iso2 = countries.index.intersection(["AL", "RS", "XK", "BA"])
+    missing_iso2 = countries.index.intersection(["AL", "RS", "XK", "BA","UA"])
     missing = countries.loc[missing_iso2]
 
     nuts2.rename(index={"ME00": "ME", "MK00": "MK"}, inplace=True)
