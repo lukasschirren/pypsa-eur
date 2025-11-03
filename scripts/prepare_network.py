@@ -113,35 +113,149 @@ def add_gaslimit(n, gaslimit, Nyears=1.0):
     )
 
 
-def add_emission_prices(n, emission_prices={"co2": 0.0}, exclude_co2=False):
+def add_emission_prices(n, emission_prices={"co2": 0.0}, regional_prices=None, exclude_co2=False):
+    """
+    Add emission prices to generators and storage units.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to add emission prices to
+    emission_prices : dict, optional
+        Uniform emission prices for all regions, by default {"co2": 0.0}
+    regional_prices : dict, optional
+        Regional emission prices, by default None
+        Structure: {"country_code": {"co2": price}, ...}
+        Example: {"DE": {"co2": 60.0}, "FR": {"co2": 45.0}}
+    exclude_co2 : bool, optional
+        Whether to exclude CO2 prices, by default False
+    """
     if exclude_co2:
-        emission_prices.pop("co2")
-    ep = (
-        pd.Series(emission_prices).rename(lambda x: x + "_emissions")
-        * n.carriers.filter(like="_emissions")
-    ).sum(axis=1)
-    gen_ep = n.generators.carrier.map(ep) / n.generators.efficiency
-    n.generators["marginal_cost"] += gen_ep
-    n.generators_t["marginal_cost"] += gen_ep[n.generators_t["marginal_cost"].columns]
-    su_ep = n.storage_units.carrier.map(ep) / n.storage_units.efficiency_dispatch
-    n.storage_units["marginal_cost"] += su_ep
+        if regional_prices:
+            for region in regional_prices:
+                regional_prices[region].pop("co2", None)
+        else:
+            emission_prices.pop("co2", None)
+
+    if regional_prices:
+        logger.info("Applying regional emission prices")
+        
+        # Apply regional prices
+        for country, prices in regional_prices.items():
+            # Find generators in this country
+            country_buses = n.buses.index[n.buses.country == country]
+            gen_mask = n.generators.bus.isin(country_buses)
+            su_mask = n.storage_units.bus.isin(country_buses) if not n.storage_units.empty else pd.Series(dtype=bool)
+            
+            if gen_mask.any():
+                # Calculate emission prices for this region
+                ep = (
+                    pd.Series(prices).rename(lambda x: x + "_emissions")
+                    * n.carriers.filter(like="_emissions")
+                ).sum(axis=1)
+                
+                # Apply to generators - same logic as uniform pricing
+                gen_ep = n.generators.loc[gen_mask, "carrier"].map(ep) / n.generators.loc[gen_mask, "efficiency"]
+                n.generators.loc[gen_mask, "marginal_cost"] += gen_ep
+                
+                # Apply to time-varying marginal costs - same logic as uniform pricing
+                if not n.generators_t["marginal_cost"].empty:
+                    gen_cols = n.generators_t["marginal_cost"].columns.intersection(gen_ep.index)
+                    if len(gen_cols) > 0:
+                        n.generators_t["marginal_cost"].loc[:, gen_cols] += gen_ep[gen_cols]
+                
+                logger.info(f"Applied emission prices to {gen_mask.sum()} generators in {country}: {prices}")
+            
+            # Apply to storage units
+            if not n.storage_units.empty and su_mask.any():
+                ep = (
+                    pd.Series(prices).rename(lambda x: x + "_emissions")
+                    * n.carriers.filter(like="_emissions")
+                ).sum(axis=1)
+                su_ep = n.storage_units.loc[su_mask, "carrier"].map(ep) / n.storage_units.loc[su_mask, "efficiency_dispatch"]
+                n.storage_units.loc[su_mask, "marginal_cost"] += su_ep
+    else:
+        # Apply uniform prices (original logic)
+        ep = (
+            pd.Series(emission_prices).rename(lambda x: x + "_emissions")
+            * n.carriers.filter(like="_emissions")
+        ).sum(axis=1)
+        gen_ep = n.generators.carrier.map(ep) / n.generators.efficiency
+        n.generators["marginal_cost"] += gen_ep
+        n.generators_t["marginal_cost"] += gen_ep[n.generators_t["marginal_cost"].columns]
+        if not n.storage_units.empty:
+            su_ep = n.storage_units.carrier.map(ep) / n.storage_units.efficiency_dispatch
+            n.storage_units["marginal_cost"] += su_ep
 
 
-def add_dynamic_emission_prices(n, fn):
-    co2_price = pd.read_csv(fn, index_col=0, parse_dates=True)
-    co2_price = co2_price[~co2_price.index.duplicated()]
-    co2_price = co2_price.reindex(n.snapshots).ffill().bfill()
+def add_dynamic_emission_prices(n, fn, regional_prices_files=None):
+    """
+    Add time-varying emission prices to generators.
 
-    emissions = (
-        n.generators.carrier.map(n.carriers.co2_emissions) / n.generators.efficiency
-    )
-    co2_cost = expand_series(emissions, n.snapshots).T.mul(co2_price.iloc[:, 0], axis=0)
+    Parameters
+    ----------
+    n : pypsa.Network
+        Network to add emission prices to
+    fn : str
+        Path to CSV file with time-varying CO2 prices (for uniform pricing)
+    regional_prices_files : dict, optional
+        Dictionary mapping country codes to CSV files with regional time-varying prices
+        Structure: {"country_code": "path/to/co2_prices.csv", ...}
+        Example: {"DE": "data/co2_prices_de.csv", "FR": "data/co2_prices_fr.csv"}
+    """
+    if regional_prices_files:
+        logger.info("Applying regional time-varying emission prices")
+        
+        static = n.generators.marginal_cost
+        dynamic = n.get_switchable_as_dense("Generator", "marginal_cost")
+        
+        for country, price_file in regional_prices_files.items():
+            # Load regional price data
+            co2_price = pd.read_csv(price_file, index_col=0, parse_dates=True)
+            co2_price = co2_price[~co2_price.index.duplicated()]
+            co2_price = co2_price.reindex(n.snapshots).ffill().bfill()
+            
+            # Find generators in this country
+            country_buses = n.buses.index[n.buses.country == country]
+            gen_mask = n.generators.bus.isin(country_buses)
+            
+            if gen_mask.any():
+                # Calculate emissions for generators in this region - same as uniform logic
+                emissions = (
+                    n.generators.loc[gen_mask, "carrier"].map(n.carriers.co2_emissions) 
+                    / n.generators.loc[gen_mask, "efficiency"]
+                )
+                
+                # Create time-varying costs for this region - same as uniform logic
+                co2_cost = expand_series(emissions, n.snapshots).T.mul(co2_price.iloc[:, 0], axis=0)
+                
+                # Add to dynamic marginal costs - co2_cost.columns are the generator names
+                gen_cols = dynamic.columns.intersection(co2_cost.columns)
+                if len(gen_cols) > 0:
+                    dynamic.loc[:, gen_cols] += co2_cost[gen_cols]
+                
+                logger.info(f"Applied time-varying emission prices to {gen_mask.sum()} generators in {country}")
+        
+        # Update network with combined dynamic costs
+        marginal_cost = dynamic
+        n.generators_t.marginal_cost = marginal_cost.loc[:, marginal_cost.ne(static).any()]
+        
+    else:
+        # Apply uniform time-varying prices (original logic)
+        co2_price = pd.read_csv(fn, index_col=0, parse_dates=True)
+        co2_price = co2_price[~co2_price.index.duplicated()]
+        co2_price = co2_price.reindex(n.snapshots).ffill().bfill()
 
-    static = n.generators.marginal_cost
-    dynamic = n.get_switchable_as_dense("Generator", "marginal_cost")
+        emissions = (
+            n.generators.carrier.map(n.carriers.co2_emissions) / n.generators.efficiency
+        )
+        co2_cost = expand_series(emissions, n.snapshots).T.mul(co2_price.iloc[:, 0], axis=0)
 
-    marginal_cost = dynamic + co2_cost.reindex(columns=dynamic.columns, fill_value=0)
-    n.generators_t.marginal_cost = marginal_cost.loc[:, marginal_cost.ne(static).any()]
+        static = n.generators.marginal_cost
+        dynamic = n.get_switchable_as_dense("Generator", "marginal_cost")
+
+        marginal_cost = dynamic + co2_cost.reindex(columns=dynamic.columns, fill_value=0)
+        n.generators_t.marginal_cost = marginal_cost.loc[:, marginal_cost.ne(static).any()]
 
 
 def set_line_s_max_pu(n, s_max_pu=0.7):
@@ -338,7 +452,26 @@ if __name__ == "__main__":
     maybe_adjust_costs_and_potentials(n, snakemake.params["adjustments"])
 
     emission_prices = snakemake.params.costs["emission_prices"]
-    if emission_prices["co2_monthly_prices"]:
+    
+    # Check if regional pricing is enabled
+    regional_config = emission_prices.get("regional_prices", {})
+    if regional_config.get("enable", False):
+        logger.info("Regional emission pricing enabled")
+        
+        # Handle regional time-varying prices
+        if regional_config.get("monthly_prices_files") and any(regional_config["monthly_prices_files"].values()):
+            logger.info("Setting regional time-varying emission prices")
+            add_dynamic_emission_prices(n, None, regional_prices_files=regional_config["monthly_prices_files"])
+        
+        # Handle regional static prices
+        elif regional_config.get("prices"):
+            logger.info("Setting regional static emission prices")
+            add_emission_prices(n, regional_prices=regional_config["prices"])
+        else:
+            logger.warning("Regional emission pricing enabled but no prices configured")
+    
+    # Standard uniform pricing (backward compatibility)
+    elif emission_prices["co2_monthly_prices"]:
         logger.info(
             "Setting time dependent emission prices according spot market price"
         )
