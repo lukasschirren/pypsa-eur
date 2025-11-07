@@ -399,10 +399,10 @@ def add_local_co2_constraint(n: pypsa.Network, local_co2: dict) -> None:
     for country in countries:
         # CO2 allowance
         limit = local_co2[country][year]
-        logger.info("Individual CO2 emissions limit relative to 1990 :", limit)
+        logger.info(f"Individual CO2 emissions limit relative to 1990: {limit}")
         co2_1990 = co2_totals.loc[country, sectors].sum() # tCO2 emissions per year
         co2_allowance = co2_1990 * limit * nyears
-        logger.info("CO2 emissions allowance for " + country + " :", co2_allowance)
+        logger.info(f"CO2 emissions allowance for {country}: {co2_allowance}")
 
         # 1. Carbon Capture 
         dac = n.links.query('carrier == "DAC"')
