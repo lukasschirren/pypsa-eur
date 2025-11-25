@@ -49,6 +49,94 @@ spatial = SimpleNamespace()
 logger = logging.getLogger(__name__)
 
 
+def get_sector_capital_cost_for_bus(node, tech, costs, country_specific_costs, n=None):
+    """
+    Get capital cost for a technology at a specific bus/node with country-specific adjustments.
+    
+    Parameters
+    ----------
+    node : str
+        Node name (e.g., "DE0 1" or "DE0 1 H2")
+    tech : str
+        Technology name
+    costs : pd.DataFrame
+        Base cost dataframe
+    country_specific_costs : dict
+        Dictionary mapping country codes to cost dataframes
+    n : pypsa.Network, optional
+        Network object (for compatibility)
+    
+    Returns
+    -------
+    float
+        Capital cost for the technology at the specified node
+    """
+    if not country_specific_costs or tech not in costs.index:
+        return costs.at[tech, "capital_cost"]
+    
+    # Extract country from node name (first 2 characters)
+    country = str(node)[:2]
+    
+    if country in country_specific_costs and tech in country_specific_costs[country].index:
+        return country_specific_costs[country].at[tech, "capital_cost"]
+    else:
+        return costs.at[tech, "capital_cost"]
+
+
+def get_sector_costs_for_bus(node, costs, country_specific_costs, n=None):
+    """
+    Get all costs for a specific bus/node with country-specific adjustments.
+    
+    Parameters
+    ----------
+    node : str
+        Node name
+    costs : pd.DataFrame
+        Base cost dataframe
+    country_specific_costs : dict
+        Dictionary mapping country codes to cost dataframes  
+    n : pypsa.Network, optional
+        Network object (for compatibility)
+        
+    Returns
+    -------
+    pd.DataFrame
+        Cost dataframe for the specific country, or base costs if no country-specific data
+    """
+    if not country_specific_costs:
+        return costs
+    
+    # Extract country from node name (first 2 characters)
+    country = str(node)[:2]
+    
+    if country in country_specific_costs:
+        return country_specific_costs[country]
+    else:
+        return costs
+
+
+def get_sector_country_discount_rate(country, costs_config):
+    """
+    Get country-specific discount rate from costs configuration.
+    
+    Parameters
+    ----------
+    country : str
+        Country code
+    costs_config : dict
+        Costs configuration dictionary
+        
+    Returns
+    -------
+    float
+        Discount rate for the country
+    """
+    country_rates = costs_config.get("local_discountrate", {})
+    if country in country_rates:
+        return country_rates[country]
+    else:
+        return costs_config["fill_values"]["discount rate"]
+
 def define_spatial(nodes, options):
     """
     Namespace for spatial.
@@ -521,6 +609,7 @@ def add_carrier_buses(
     costs: pd.DataFrame,
     spatial: SimpleNamespace,
     options: dict,
+    country_specific_costs: dict = None,
     cf_industry: dict | None = None,
     nodes: pd.Index | list | set | None = None,
 ) -> None:
@@ -578,25 +667,55 @@ def add_carrier_buses(
 
     unit = "MWh_LHV" if carrier == "gas" else "MWh_th"
 
-    # Calculate carrier-specific storage costs
-    if carrier == "gas":
-        capital_cost = costs.at["gas storage", "capital_cost"]
-    elif carrier == "oil":
-        # based on https://www.engineeringtoolbox.com/fuels-higher-calorific-values-d_169.html
-        mwh_per_m3 = 44.9 * 724 * 0.278 * 1e-3  # MJ/kg * kg/m3 * kWh/MJ * MWh/kWh
-        capital_cost = (
-            costs.at["General liquid hydrocarbon storage (product)", "capital_cost"]
-            / mwh_per_m3
-        )
-    elif carrier == "methanol":
-        # based on https://www.engineeringtoolbox.com/fossil-fuels-energy-content-d_1298.html
-        mwh_per_m3 = 5.54 * 791 * 1e-3  # kWh/kg * kg/m3 * MWh/kWh
-        capital_cost = (
-            costs.at["General liquid hydrocarbon storage (product)", "capital_cost"]
-            / mwh_per_m3
-        )
+    # Calculate carrier-specific storage costs with country-specific discount rates
+    if country_specific_costs:
+        # Calculate capital costs per node using country-specific costs
+        capital_costs = []
+        for node in nodes:
+            node_costs = get_sector_costs_for_bus(node, costs, country_specific_costs, n)
+            
+            if carrier == "gas":
+                capital_costs.append(node_costs.at["gas storage", "capital_cost"])
+            elif carrier == "oil":
+                # based on https://www.engineeringtoolbox.com/fuels-higher-calorific-values-d_169.html
+                mwh_per_m3 = 44.9 * 724 * 0.278 * 1e-3  # MJ/kg * kg/m3 * kWh/MJ * MWh/kWh
+                capital_costs.append(
+                    node_costs.at["General liquid hydrocarbon storage (product)", "capital_cost"] / mwh_per_m3
+                )
+            elif carrier == "methanol":
+                # based on https://www.engineeringtoolbox.com/fossil-fuels-energy-content-d_1298.html
+                mwh_per_m3 = 5.54 * 791 * 1e-3  # kWh/kg * kg/m3 * MWh/kWh
+                capital_costs.append(
+                    node_costs.at["General liquid hydrocarbon storage (product)", "capital_cost"] / mwh_per_m3
+                )
+            else:
+                capital_costs.append(0.1)
+        
+        # Create Series with Store component names as index
+        store_names = nodes + " Store"
+        capital_costs = pd.Series(capital_costs, index=store_names)
     else:
-        capital_cost = 0.1
+        # Use base costs for all nodes (more efficient)
+        if carrier == "gas":
+            capital_cost = costs.at["gas storage", "capital_cost"]
+        elif carrier == "oil":
+            # based on https://www.engineeringtoolbox.com/fuels-higher-calorific-values-d_169.html
+            mwh_per_m3 = 44.9 * 724 * 0.278 * 1e-3  # MJ/kg * kg/m3 * kWh/MJ * MWh/kWh
+            capital_cost = (
+                costs.at["General liquid hydrocarbon storage (product)", "capital_cost"]
+                / mwh_per_m3
+            )
+        elif carrier == "methanol":
+            # based on https://www.engineeringtoolbox.com/fossil-fuels-energy-content-d_1298.html
+            mwh_per_m3 = 5.54 * 791 * 1e-3  # kWh/kg * kg/m3 * MWh/kWh
+            capital_cost = (
+                costs.at["General liquid hydrocarbon storage (product)", "capital_cost"]
+                / mwh_per_m3
+            )
+        else:
+            capital_cost = 0.1
+        
+        capital_costs = capital_cost
 
     n.add("Bus", nodes, location=location, carrier=carrier, unit=unit)
 
@@ -607,7 +726,7 @@ def add_carrier_buses(
         e_nom_extendable=True,
         e_cyclic=True,
         carrier=carrier,
-        capital_cost=capital_cost,
+        capital_cost=capital_costs,  # pass Series indexed by component names for safe alignment
     )
 
     fossils = ["coal", "gas", "oil", "lignite"]
@@ -723,7 +842,7 @@ def add_eu_bus(n, x=-5.5, y=46):
     n.add("Carrier", "none")
 
 
-def add_co2_tracking(n, costs, options, sequestration_potential_file=None):
+def add_co2_tracking(n, costs, options, country_specific_costs=None, sequestration_potential_file=None):
     """
     Add CO2 tracking components to the network including atmospheric CO2,
     CO2 storage, and sequestration infrastructure.
@@ -787,11 +906,21 @@ def add_co2_tracking(n, costs, options, sequestration_potential_file=None):
         unit="t_co2",
     )
 
+    # Calculate CO2 storage capital costs with country-specific discount rates
+    if country_specific_costs:
+        co2_storage_capital_costs = []
+        for node in spatial.co2.nodes:
+            bus_costs = get_sector_costs_for_bus(node, costs, country_specific_costs, n)
+            co2_storage_capital_costs.append(bus_costs.at["CO2 storage tank", "capital_cost"])
+        co2_storage_capital_costs = pd.Series(co2_storage_capital_costs, index=spatial.co2.nodes)
+    else:
+        co2_storage_capital_costs = costs.at["CO2 storage tank", "capital_cost"]
+
     n.add(
         "Store",
         spatial.co2.nodes,
         e_nom_extendable=True,
-        capital_cost=costs.at["CO2 storage tank", "capital_cost"],
+        capital_cost=co2_storage_capital_costs,
         carrier="co2 stored",
         e_cyclic=True,
         bus=spatial.co2.nodes,
@@ -1003,7 +1132,17 @@ def add_allam_gas(
     )
 
 
-def add_biomass_to_methanol(n, costs):
+def add_biomass_to_methanol(n, costs, country_specific_costs=None):
+    component_names = spatial.biomass.nodes + " biomass-to-methanol"
+    capital_cost_list = [
+        get_sector_capital_cost_for_bus(node, "biomass-to-methanol", costs, country_specific_costs or {}, n) 
+        / costs.at["biomass-to-methanol", "efficiency"]
+        if country_specific_costs else 
+        costs.at["biomass-to-methanol", "capital_cost"] / costs.at["biomass-to-methanol", "efficiency"]
+        for node in spatial.biomass.nodes
+    ]
+    capital_cost_series = pd.Series(capital_cost_list, index=component_names)
+    
     n.add(
         "Link",
         spatial.biomass.nodes,
@@ -1017,14 +1156,26 @@ def add_biomass_to_methanol(n, costs):
         efficiency2=-costs.at["solid biomass", "CO2 intensity"]
         + costs.at["biomass-to-methanol", "CO2 stored"],
         p_nom_extendable=True,
-        capital_cost=costs.at["biomass-to-methanol", "capital_cost"]
-        / costs.at["biomass-to-methanol", "efficiency"],
+        capital_cost=capital_cost_series,
         marginal_cost=costs.loc["biomass-to-methanol", "VOM"]
         / costs.at["biomass-to-methanol", "efficiency"],
     )
 
 
-def add_biomass_to_methanol_cc(n, costs):
+def add_biomass_to_methanol_cc(n, costs, country_specific_costs=None):
+    component_names = spatial.biomass.nodes + " biomass-to-methanol CC"
+    capital_cost_list = [
+        (get_sector_capital_cost_for_bus(node, "biomass-to-methanol", costs, country_specific_costs or {}, n) 
+         / costs.at["biomass-to-methanol", "efficiency"]
+         + costs.at["biomass CHP capture", "capital_cost"]
+         * costs.at["biomass-to-methanol", "CO2 stored"])
+        if country_specific_costs else 
+        (costs.at["biomass-to-methanol", "capital_cost"] / costs.at["biomass-to-methanol", "efficiency"]
+         + costs.at["biomass CHP capture", "capital_cost"] * costs.at["biomass-to-methanol", "CO2 stored"])
+        for node in spatial.biomass.nodes
+    ]
+    capital_cost_series = pd.Series(capital_cost_list, index=component_names)
+    
     n.add(
         "Link",
         spatial.biomass.nodes,
@@ -1042,16 +1193,13 @@ def add_biomass_to_methanol_cc(n, costs):
         efficiency3=costs.at["biomass-to-methanol", "CO2 stored"]
         * costs.at["biomass-to-methanol", "capture rate"],
         p_nom_extendable=True,
-        capital_cost=costs.at["biomass-to-methanol", "capital_cost"]
-        / costs.at["biomass-to-methanol", "efficiency"]
-        + costs.at["biomass CHP capture", "capital_cost"]
-        * costs.at["biomass-to-methanol", "CO2 stored"],
+        capital_cost=capital_cost_series,
         marginal_cost=costs.loc["biomass-to-methanol", "VOM"]
         / costs.at["biomass-to-methanol", "efficiency"],
     )
 
 
-def add_methanol_to_power(n, costs, pop_layout, types=None):
+def add_methanol_to_power(n, costs, pop_layout, country_specific_costs=None, types=None):
     if types is None:
         types = {}
 
@@ -1059,6 +1207,15 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
 
     if types["allam"]:
         logger.info("Adding Allam cycle methanol power plants.")
+
+        component_names = nodes + " allam methanol"
+        capital_cost_list = [
+            get_sector_capital_cost_for_bus(node, "allam", costs, country_specific_costs or {}, n) * costs.at["allam", "efficiency"]
+            if country_specific_costs else 
+            costs.at["allam", "capital_cost"] * costs.at["allam", "efficiency"]
+            for node in nodes
+        ]
+        capital_cost_series = pd.Series(capital_cost_list, index=component_names)
 
         n.add(
             "Link",
@@ -1070,8 +1227,7 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
             bus3="co2 atmosphere",
             carrier="allam methanol",
             p_nom_extendable=True,
-            capital_cost=costs.at["allam", "capital_cost"]
-            * costs.at["allam", "efficiency"],
+            capital_cost=capital_cost_series,
             marginal_cost=costs.at["allam", "VOM"] * costs.at["allam", "efficiency"],
             efficiency=costs.at["allam", "efficiency"],
             efficiency2=0.98 * costs.at["methanolisation", "carbondioxide-input"],
@@ -1083,7 +1239,14 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
         logger.info("Adding methanol CCGT power plants.")
 
         # efficiency * EUR/MW * (annuity + FOM)
-        capital_cost = costs.at["CCGT", "efficiency"] * costs.at["CCGT", "capital_cost"]
+        capital_cost = [
+            get_sector_capital_cost_for_bus(node, "CCGT", costs, country_specific_costs or {}, n) * costs.at["CCGT", "efficiency"]
+            if country_specific_costs else 
+            costs.at["CCGT", "efficiency"] * costs.at["CCGT", "capital_cost"]
+            for node in nodes
+        ]
+        component_names = nodes + " CCGT methanol"
+        capital_cost_series = pd.Series(capital_cost, index=component_names)
 
         n.add(
             "Link",
@@ -1094,7 +1257,7 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
             bus2="co2 atmosphere",
             carrier="CCGT methanol",
             p_nom_extendable=True,
-            capital_cost=capital_cost,
+            capital_cost=capital_cost_series,
             marginal_cost=costs.at["CCGT", "VOM"],
             efficiency=costs.at["CCGT", "efficiency"],
             efficiency2=costs.at["methanolisation", "carbondioxide-input"],
@@ -1109,13 +1272,16 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
         # TODO consider efficiency changes / energy inputs for CC
 
         # efficiency * EUR/MW * (annuity + FOM)
-        capital_cost = costs.at["CCGT", "efficiency"] * costs.at["CCGT", "capital_cost"]
+        capital_cost = [
+            get_sector_capital_cost_for_bus(node, "CCGT", costs, country_specific_costs or {}, n) * costs.at["CCGT", "efficiency"]
+            if country_specific_costs else 
+            costs.at["CCGT", "efficiency"] * costs.at["CCGT", "capital_cost"]
+            for node in nodes
+        ]
 
-        capital_cost_cc = (
-            capital_cost
-            + costs.at["cement capture", "capital_cost"]
-            * costs.at["methanolisation", "carbondioxide-input"]
-        )
+        capital_cost_cc = [cc + costs.at["cement capture", "capital_cost"] * costs.at["methanolisation", "carbondioxide-input"] for cc in capital_cost]
+        component_names = nodes + " CCGT methanol CC"
+        capital_cost_cc_series = pd.Series(capital_cost_cc, index=component_names)
 
         n.add(
             "Link",
@@ -1127,7 +1293,7 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
             bus3="co2 atmosphere",
             carrier="CCGT methanol CC",
             p_nom_extendable=True,
-            capital_cost=capital_cost_cc,
+            capital_cost=capital_cost_cc_series,
             marginal_cost=costs.at["CCGT", "VOM"],
             efficiency=costs.at["CCGT", "efficiency"],
             efficiency2=costs.at["cement capture", "capture_rate"]
@@ -1140,6 +1306,15 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
     if types["ocgt"]:
         logger.info("Adding methanol OCGT power plants.")
 
+        component_names = nodes + " OCGT methanol"
+        capital_cost_list = [
+            get_sector_capital_cost_for_bus(node, "OCGT", costs, country_specific_costs or {}, n) * costs.at["OCGT", "efficiency"]
+            if country_specific_costs else 
+            costs.at["OCGT", "capital_cost"] * costs.at["OCGT", "efficiency"]
+            for node in nodes
+        ]
+        capital_cost_series = pd.Series(capital_cost_list, index=component_names)
+
         n.add(
             "Link",
             nodes,
@@ -1149,8 +1324,7 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
             bus2="co2 atmosphere",
             carrier="OCGT methanol",
             p_nom_extendable=True,
-            capital_cost=costs.at["OCGT", "capital_cost"]
-            * costs.at["OCGT", "efficiency"],
+            capital_cost=capital_cost_series,
             marginal_cost=costs.at["OCGT", "VOM"] * costs.at["OCGT", "efficiency"],
             efficiency=costs.at["OCGT", "efficiency"],
             efficiency2=costs.at["methanolisation", "carbondioxide-input"],
@@ -1158,12 +1332,19 @@ def add_methanol_to_power(n, costs, pop_layout, types=None):
         )
 
 
-def add_methanol_reforming(n, costs):
+def add_methanol_reforming(n, costs, country_specific_costs=None):
     logger.info("Adding methanol steam reforming.")
 
     tech = "Methanol steam reforming"
 
-    capital_cost = costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
+    component_names = spatial.h2.locations + f" {tech}"
+    capital_cost_list = [
+        get_sector_capital_cost_for_bus(loc, tech, costs, country_specific_costs or {}, n) / costs.at[tech, "methanol-input"]
+        if country_specific_costs else 
+        costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
+        for loc in spatial.h2.locations
+    ]
+    capital_cost_series = pd.Series(capital_cost_list, index=component_names)
 
     n.add(
         "Link",
@@ -1173,7 +1354,7 @@ def add_methanol_reforming(n, costs):
         bus1=spatial.h2.nodes,
         bus2="co2 atmosphere",
         p_nom_extendable=True,
-        capital_cost=capital_cost,
+        capital_cost=capital_cost_series,
         efficiency=1 / costs.at[tech, "methanol-input"],
         efficiency2=costs.at["methanolisation", "carbondioxide-input"],
         carrier=tech,
@@ -1181,7 +1362,7 @@ def add_methanol_reforming(n, costs):
     )
 
 
-def add_methanol_reforming_cc(n, costs):
+def add_methanol_reforming_cc(n, costs, country_specific_costs=None):
     logger.info("Adding methanol steam reforming with carbon capture.")
 
     tech = "Methanol steam reforming"
@@ -1190,13 +1371,16 @@ def add_methanol_reforming_cc(n, costs):
     # but the energy demands for carbon capture have not yet been added for other CC processes
     # 10.1016/j.rser.2020.110171: 0.129 kWh_e/kWh_H2, -0.09 kWh_heat/kWh_H2
 
-    capital_cost = costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
+    capital_cost_list = [
+        get_sector_capital_cost_for_bus(loc, tech, costs, country_specific_costs or {}, n) / costs.at[tech, "methanol-input"]
+        if country_specific_costs else 
+        costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
+        for loc in spatial.h2.locations
+    ]
 
-    capital_cost_cc = (
-        capital_cost
-        + costs.at["cement capture", "capital_cost"]
-        * costs.at["methanolisation", "carbondioxide-input"]
-    )
+    capital_cost_cc = [cc + costs.at["cement capture", "capital_cost"] * costs.at["methanolisation", "carbondioxide-input"] for cc in capital_cost_list]
+    component_names = spatial.h2.locations + f" {tech} CC"
+    capital_cost_cc_series = pd.Series(capital_cost_cc, index=component_names)
 
     n.add(
         "Link",
@@ -1207,7 +1391,7 @@ def add_methanol_reforming_cc(n, costs):
         bus2="co2 atmosphere",
         bus3=spatial.co2.nodes,
         p_nom_extendable=True,
-        capital_cost=capital_cost_cc,
+        capital_cost=capital_cost_cc_series,
         efficiency=1 / costs.at[tech, "methanol-input"],
         efficiency2=(1 - costs.at["cement capture", "capture_rate"])
         * costs.at["methanolisation", "carbondioxide-input"],
@@ -1398,6 +1582,7 @@ def add_ammonia(
     pop_layout: pd.DataFrame,
     spatial: SimpleNamespace,
     cf_industry: dict,
+    country_specific_costs: dict = None,
 ) -> None:
     """
     Add ammonia synthesis, cracking, and storage infrastructure to the network.
@@ -1462,8 +1647,18 @@ def add_ammonia(
         efficiency=1 / costs.at["Haber-Bosch", "electricity-input"],
         efficiency2=-costs.at["Haber-Bosch", "hydrogen-input"]
         / costs.at["Haber-Bosch", "electricity-input"],
-        capital_cost=costs.at["Haber-Bosch", "capital_cost"]
-        / costs.at["Haber-Bosch", "electricity-input"],
+        capital_cost=(
+            pd.Series(
+                [
+                    get_sector_capital_cost_for_bus(node, "Haber-Bosch", costs, country_specific_costs or {}, n) 
+                    / costs.at["Haber-Bosch", "electricity-input"]
+                    if country_specific_costs else 
+                    costs.at["Haber-Bosch", "capital_cost"] / costs.at["Haber-Bosch", "electricity-input"]
+                    for node in nodes
+                ],
+                index=nodes + " Haber-Bosch",
+            )
+        ),
         marginal_cost=costs.at["Haber-Bosch", "VOM"]
         / costs.at["Haber-Bosch", "electricity-input"],
         lifetime=costs.at["Haber-Bosch", "lifetime"],
@@ -1478,8 +1673,18 @@ def add_ammonia(
         p_nom_extendable=True,
         carrier="ammonia cracker",
         efficiency=1 / cf_industry["MWh_NH3_per_MWh_H2_cracker"],
-        capital_cost=costs.at["Ammonia cracker", "capital_cost"]
-        / cf_industry["MWh_NH3_per_MWh_H2_cracker"],  # given per MW_H2
+        capital_cost=(
+            pd.Series(
+                [
+                    get_sector_capital_cost_for_bus(node, "Ammonia cracker", costs, country_specific_costs or {}, n) 
+                    / cf_industry["MWh_NH3_per_MWh_H2_cracker"]
+                    if country_specific_costs else 
+                    costs.at["Ammonia cracker", "capital_cost"] / cf_industry["MWh_NH3_per_MWh_H2_cracker"]
+                    for node in nodes
+                ],
+                index=nodes + " ammonia cracker",
+            )
+        ),  # given per MW_H2
         lifetime=costs.at["Ammonia cracker", "lifetime"],
     )
 
@@ -1492,9 +1697,17 @@ def add_ammonia(
         e_nom_extendable=True,
         e_cyclic=True,
         carrier="ammonia store",
-        capital_cost=costs.at[
-            "NH3 (l) storage tank incl. liquefaction", "capital_cost"
-        ],
+        capital_cost=(
+            pd.Series(
+                [
+                    get_sector_capital_cost_for_bus(node, "NH3 (l) storage tank incl. liquefaction", costs, country_specific_costs or {}, n)
+                    if country_specific_costs else 
+                    costs.at["NH3 (l) storage tank incl. liquefaction", "capital_cost"]
+                    for node in spatial.ammonia.nodes
+                ],
+                index=[node + " ammonia store" for node in spatial.ammonia.nodes],
+            )
+        ),
         lifetime=costs.at["NH3 (l) storage tank incl. liquefaction", "lifetime"],
     )
 
@@ -1579,9 +1792,7 @@ def insert_electricity_distribution_grid(
         efficiency := options["transmission_efficiency"]
         .get("electricity distribution grid", {})
         .get("efficiency_static")
-    ) and "electricity distribution grid" in options["transmission_efficiency"][
-        "enable"
-    ]:
+    ) and "electricity distribution grid" in options["transmission_efficiency"]["enable"]:
         logger.info(
             f"Deducting distribution losses from electricity demand: {np.around(100 * (1 - efficiency), decimals=2)}%"
         )
@@ -1757,6 +1968,7 @@ def add_storage_and_grids(
     gas_input_nodes,
     spatial,
     options,
+    country_specific_costs=None,
 ):
     """
     Add storage and grid infrastructure to the network including hydrogen, gas, and battery systems.
@@ -1822,6 +2034,16 @@ def add_storage_and_grids(
 
     n.add("Bus", nodes + " H2", location=nodes, carrier="H2", unit="MWh_LHV")
 
+    # Calculate country-specific capital costs for H2 Electrolysis
+    if country_specific_costs:
+        electrolysis_capital_cost = pd.Series(
+            [get_sector_capital_cost_for_bus(node, "electrolysis", costs, country_specific_costs, n) 
+             for node in nodes],
+            index=nodes + " H2 Electrolysis"
+        )
+    else:
+        electrolysis_capital_cost = costs.at["electrolysis", "capital_cost"]
+
     n.add(
         "Link",
         nodes + " H2 Electrolysis",
@@ -1830,12 +2052,22 @@ def add_storage_and_grids(
         p_nom_extendable=True,
         carrier="H2 Electrolysis",
         efficiency=costs.at["electrolysis", "efficiency"],
-        capital_cost=costs.at["electrolysis", "capital_cost"],
+        capital_cost=electrolysis_capital_cost,
         lifetime=costs.at["electrolysis", "lifetime"],
     )
 
     if options["hydrogen_fuel_cell"]:
         logger.info("Adding hydrogen fuel cell for re-electrification.")
+
+        # Calculate country-specific capital costs for H2 Fuel Cell
+        if country_specific_costs:
+            fuel_cell_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "fuel cell", costs, country_specific_costs, n) 
+                 * costs.at["fuel cell", "efficiency"] for node in nodes],
+                index=nodes + " H2 Fuel Cell"
+            )
+        else:
+            fuel_cell_capital_cost = costs.at["fuel cell", "capital_cost"] * costs.at["fuel cell", "efficiency"]
 
         n.add(
             "Link",
@@ -1845,8 +2077,7 @@ def add_storage_and_grids(
             p_nom_extendable=True,
             carrier="H2 Fuel Cell",
             efficiency=costs.at["fuel cell", "efficiency"],
-            capital_cost=costs.at["fuel cell", "capital_cost"]
-            * costs.at["fuel cell", "efficiency"],  # NB: fixed cost is per MWel
+            capital_cost=fuel_cell_capital_cost,
             lifetime=costs.at["fuel cell", "lifetime"],
         )
 
@@ -1856,6 +2087,16 @@ def add_storage_and_grids(
         )
         # TODO: perhaps replace with hydrogen-specific technology assumptions.
 
+        # Calculate country-specific capital costs for H2 turbine
+        if country_specific_costs:
+            h2_turbine_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "OCGT", costs, country_specific_costs, n) 
+                 * costs.at["OCGT", "efficiency"] for node in nodes],
+                index=nodes + " H2 turbine"
+            )
+        else:
+            h2_turbine_capital_cost = costs.at["OCGT", "capital_cost"] * costs.at["OCGT", "efficiency"]
+
         n.add(
             "Link",
             nodes + " H2 turbine",
@@ -1864,8 +2105,7 @@ def add_storage_and_grids(
             p_nom_extendable=True,
             carrier="H2 turbine",
             efficiency=costs.at["OCGT", "efficiency"],
-            capital_cost=costs.at["OCGT", "capital_cost"]
-            * costs.at["OCGT", "efficiency"],  # NB: fixed cost is per MWel
+            capital_cost=h2_turbine_capital_cost,
             marginal_cost=costs.at["OCGT", "VOM"],
             lifetime=costs.at["OCGT", "lifetime"],
         )
@@ -2087,6 +2327,22 @@ def add_storage_and_grids(
 
     n.add("Bus", nodes + " battery", location=nodes, carrier="battery", unit="MWh_el")
 
+    # Calculate country-specific capital costs for battery storage
+    if country_specific_costs:
+        battery_storage_capital_cost = pd.Series(
+            [get_sector_capital_cost_for_bus(node, "battery storage", costs, country_specific_costs, n) 
+             for node in nodes],
+            index=nodes + " battery"
+        )
+        battery_inverter_capital_cost = pd.Series(
+            [get_sector_capital_cost_for_bus(node, "battery inverter", costs, country_specific_costs, n) 
+             for node in nodes],
+            index=nodes + " battery charger"
+        )
+    else:
+        battery_storage_capital_cost = costs.at["battery storage", "capital_cost"]
+        battery_inverter_capital_cost = costs.at["battery inverter", "capital_cost"]
+
     n.add(
         "Store",
         nodes + " battery",
@@ -2094,7 +2350,7 @@ def add_storage_and_grids(
         e_cyclic=True,
         e_nom_extendable=True,
         carrier="battery",
-        capital_cost=costs.at["battery storage", "capital_cost"],
+        capital_cost=battery_storage_capital_cost,
         lifetime=costs.at["battery storage", "lifetime"],
     )
 
@@ -2105,7 +2361,7 @@ def add_storage_and_grids(
         bus1=nodes + " battery",
         carrier="battery charger",
         efficiency=costs.at["battery inverter", "efficiency"] ** 0.5,
-        capital_cost=costs.at["battery inverter", "capital_cost"],
+        capital_cost=battery_inverter_capital_cost,
         p_nom_extendable=True,
         lifetime=costs.at["battery inverter", "lifetime"],
     )
@@ -2122,6 +2378,16 @@ def add_storage_and_grids(
     )
 
     if options["methanation"]:
+        # Calculate country-specific capital costs for methanation
+        if country_specific_costs:
+            methanation_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "methanation", costs, country_specific_costs, n) 
+                 * costs.at["methanation", "efficiency"] for node in spatial.nodes],
+                index=spatial.nodes + " Sabatier"
+            )
+        else:
+            methanation_capital_cost = costs.at["methanation", "capital_cost"] * costs.at["methanation", "efficiency"]
+
         n.add(
             "Link",
             spatial.nodes,
@@ -2135,12 +2401,24 @@ def add_storage_and_grids(
             efficiency=costs.at["methanation", "efficiency"],
             efficiency2=-costs.at["methanation", "efficiency"]
             * costs.at["gas", "CO2 intensity"],
-            capital_cost=costs.at["methanation", "capital_cost"]
-            * costs.at["methanation", "efficiency"],  # costs given per kW_gas
+            capital_cost=methanation_capital_cost,
             lifetime=costs.at["methanation", "lifetime"],
         )
 
     if options["coal_cc"]:
+        # Calculate country-specific capital costs for coal CC
+        if country_specific_costs:
+            coal_cc_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "coal", costs, country_specific_costs, n) 
+                 * costs.at["coal", "efficiency"]
+                 + costs.at["biomass CHP capture", "capital_cost"] * costs.at["coal", "CO2 intensity"]
+                 for node in spatial.nodes],
+                index=spatial.nodes + " coal CC"
+            )
+        else:
+            coal_cc_capital_cost = (costs.at["coal", "efficiency"] * costs.at["coal", "capital_cost"] 
+                                   + costs.at["biomass CHP capture", "capital_cost"] * costs.at["coal", "CO2 intensity"])
+
         n.add(
             "Link",
             spatial.nodes,
@@ -2151,10 +2429,7 @@ def add_storage_and_grids(
             bus3=spatial.co2.nodes,
             marginal_cost=costs.at["coal", "efficiency"]
             * costs.at["coal", "VOM"],  # NB: VOM is per MWel
-            capital_cost=costs.at["coal", "efficiency"]
-            * costs.at["coal", "capital_cost"]
-            + costs.at["biomass CHP capture", "capital_cost"]
-            * costs.at["coal", "CO2 intensity"],  # NB: fixed cost is per MWel
+            capital_cost=coal_cc_capital_cost,
             p_nom_extendable=True,
             carrier="coal",
             efficiency=costs.at["coal", "efficiency"],
@@ -2166,6 +2441,16 @@ def add_storage_and_grids(
         )
 
     if options["SMR_cc"]:
+        # Calculate country-specific capital costs for SMR CC
+        if country_specific_costs:
+            smr_cc_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "SMR CC", costs, country_specific_costs, n) 
+                 for node in spatial.nodes],
+                index=spatial.nodes + " SMR CC"
+            )
+        else:
+            smr_cc_capital_cost = costs.at["SMR CC", "capital_cost"]
+
         n.add(
             "Link",
             spatial.nodes,
@@ -2179,11 +2464,21 @@ def add_storage_and_grids(
             efficiency=costs.at["SMR CC", "efficiency"],
             efficiency2=costs.at["gas", "CO2 intensity"] * (1 - options["cc_fraction"]),
             efficiency3=costs.at["gas", "CO2 intensity"] * options["cc_fraction"],
-            capital_cost=costs.at["SMR CC", "capital_cost"],
+            capital_cost=smr_cc_capital_cost,
             lifetime=costs.at["SMR CC", "lifetime"],
         )
 
     if options["SMR"]:
+        # Calculate country-specific capital costs for SMR
+        if country_specific_costs:
+            smr_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(node, "SMR", costs, country_specific_costs, n) 
+                 for node in nodes],
+                index=nodes + " SMR"
+            )
+        else:
+            smr_capital_cost = costs.at["SMR", "capital_cost"]
+
         n.add(
             "Link",
             nodes + " SMR",
@@ -2194,7 +2489,7 @@ def add_storage_and_grids(
             carrier="SMR",
             efficiency=costs.at["SMR", "efficiency"],
             efficiency2=costs.at["gas", "CO2 intensity"],
-            capital_cost=costs.at["SMR", "capital_cost"],
+            capital_cost=smr_capital_cost,
             lifetime=costs.at["SMR", "lifetime"],
         )
 
@@ -2606,6 +2901,7 @@ def add_land_transport(
     options,
     investment_year,
     nodes,
+    country_specific_costs=None,
 ) -> None:
     """
     Add land transport demand and infrastructure to the network.
@@ -3612,6 +3908,7 @@ def add_methanol(
     options: dict,
     spatial: SimpleNamespace,
     pop_layout: pd.DataFrame,
+    country_specific_costs: dict = None,
 ) -> None:
     """
     Add methanol-related components to the network.
@@ -3668,24 +3965,25 @@ def add_methanol(
 
     if options["biomass"]:
         if methanol_options["biomass_to_methanol"]:
-            add_biomass_to_methanol(n=n, costs=costs)
+            add_biomass_to_methanol(n=n, costs=costs, country_specific_costs=country_specific_costs)
 
         if methanol_options["biomass_to_methanol_cc"]:
-            add_biomass_to_methanol_cc(n=n, costs=costs)
+            add_biomass_to_methanol_cc(n=n, costs=costs, country_specific_costs=country_specific_costs)
 
     if methanol_options["methanol_to_power"]:
         add_methanol_to_power(
             n=n,
             costs=costs,
             pop_layout=pop_layout,
+            country_specific_costs=country_specific_costs,
             types=methanol_options["methanol_to_power"],
         )
 
     if methanol_options["methanol_reforming"]:
-        add_methanol_reforming(n=n, costs=costs)
+        add_methanol_reforming(n=n, costs=costs, country_specific_costs=country_specific_costs)
 
     if methanol_options["methanol_reforming_cc"]:
-        add_methanol_reforming_cc(n=n, costs=costs)
+        add_methanol_reforming_cc(n=n, costs=costs, country_specific_costs=country_specific_costs)
 
 
 def add_biomass(
@@ -3698,6 +3996,7 @@ def add_biomass(
     biomass_potentials_file,
     biomass_transport_costs_file=None,
     nyears=1,
+    country_specific_costs=None,
 ):
     """
     Add biomass-related components to the PyPSA network.
@@ -5064,6 +5363,7 @@ def add_aviation(
     pop_weighted_energy_totals: pd.DataFrame,
     options: dict,
     spatial: SimpleNamespace,
+    country_specific_costs: dict = None,
 ) -> None:
     logger.info("Add aviation")
 
@@ -5120,14 +5420,22 @@ def add_aviation(
 
         logger.info(f"Adding {tech}.")
 
-        capital_cost = costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
+        # Calculate country-specific capital costs for methanol-to-kerosene
+        if country_specific_costs:
+            methanol_to_kerosene_capital_cost = pd.Series(
+                [get_sector_capital_cost_for_bus(loc, tech, costs, country_specific_costs, n) 
+                 / costs.at[tech, "methanol-input"] for loc in spatial.h2.locations],
+                index=spatial.h2.locations + f" {tech}"
+            )
+        else:
+            methanol_to_kerosene_capital_cost = costs.at[tech, "capital_cost"] / costs.at[tech, "methanol-input"]
 
         n.add(
             "Link",
             spatial.h2.locations,
             suffix=f" {tech}",
             carrier=tech,
-            capital_cost=capital_cost,
+            capital_cost=methanol_to_kerosene_capital_cost,
             marginal_cost=costs.at[tech, "VOM"] / costs.at[tech, "methanol-input"],
             bus0=spatial.methanol.nodes,
             bus1=spatial.oil.kerosene,
@@ -5152,6 +5460,7 @@ def add_shipping(
     options: dict,
     spatial: SimpleNamespace,
     investment_year: int,
+    country_specific_costs: dict = None,
 ) -> None:
     logger.info("Add shipping")
 
@@ -5197,6 +5506,16 @@ def add_shipping(
                 unit="MWh_LHV",
             )
 
+            # Calculate country-specific capital costs for H2 liquefaction
+            if country_specific_costs:
+                h2_liquefaction_capital_cost = pd.Series(
+                    [get_sector_capital_cost_for_bus(node, "H2 liquefaction", costs, country_specific_costs, n) 
+                     for node in nodes],
+                    index=nodes + " H2 liquefaction"
+                )
+            else:
+                h2_liquefaction_capital_cost = costs.at["H2 liquefaction", "capital_cost"]
+
             n.add(
                 "Link",
                 nodes + " H2 liquefaction",
@@ -5204,7 +5523,7 @@ def add_shipping(
                 bus1=nodes + " H2 liquid",
                 carrier="H2 liquefaction",
                 efficiency=costs.at["H2 liquefaction", "efficiency"],
-                capital_cost=costs.at["H2 liquefaction", "capital_cost"],
+                capital_cost=h2_liquefaction_capital_cost,
                 p_nom_extendable=True,
                 lifetime=costs.at["H2 liquefaction", "lifetime"],
             )
@@ -5310,6 +5629,7 @@ def add_waste_heat(
     costs: pd.DataFrame,
     options: dict,
     cf_industry: dict,
+    country_specific_costs: dict = None,
 ) -> None:
     """
     Add industrial waste heat utilization capabilities to district heating systems.
@@ -5442,6 +5762,7 @@ def add_agriculture(
     investment_year: int,
     options: dict,
     spatial: SimpleNamespace,
+    country_specific_costs: dict = None,
 ) -> None:
     """
     Add agriculture, forestry and fishing sector loads to the network.
@@ -5891,6 +6212,14 @@ def add_enhanced_geothermal(
     lt = costs.at["geothermal", "lifetime"]
     FOM = costs.at["geothermal", "FOM"]
 
+    # Calculate country-specific discount rates for geothermal buses
+    # Extract country codes from bus names (first 2 characters)
+    bus_countries = pd.Series(spatial.geothermal_heat.nodes).str[:2]
+    country_discount_rates = {}
+    for bus, country in zip(spatial.geothermal_heat.nodes, bus_countries):
+        country_discount_rates[bus] = get_sector_country_discount_rate(country, costs_config)
+    
+    # Use global discount rate for annuity calculation (can be modified per bus later)
     egs_annuity = calculate_annuity(lt, dr)
 
     # under egs optimism, the expected cost reductions also cover costs for ORC
@@ -5901,6 +6230,7 @@ def add_enhanced_geothermal(
     # The orc cost are attributed to a separate link representing the ORC.
     # also capital_cost conversion Euro/kW -> Euro/MW
 
+    # Calculate base capital cost using global discount rate (will be adjusted per country later)
     egs_potentials["capital_cost"] = (
         (egs_annuity + FOM / (1.0 + FOM))
         * (egs_potentials["CAPEX"] * 1e3 - orc_capex)
@@ -5989,7 +6319,13 @@ def add_enhanced_geothermal(
             bus_eta = efficiency
 
         p_nom_max = bus_egs["p_nom_max"]
-        capital_cost = bus_egs["capital_cost"]
+
+        # Adjust capital costs for country-specific discount rate of this bus
+        dr_bus = country_discount_rates.get(bus, dr)
+        annuity_bus_geo = calculate_annuity(lt, dr_bus)
+        # factor to scale from global annuity used to compute egs_potentials to country-specific annuity
+        factor_geo = (annuity_bus_geo + FOM / (1.0 + FOM)) / (egs_annuity + FOM / (1.0 + FOM))
+        capital_cost = bus_egs["capital_cost"] * factor_geo
         bus1 = pd.Series(f"{bus} geothermal heat surface", well_name)
 
         # adding geothermal wells as multiple generators to represent supply curve
@@ -6006,7 +6342,10 @@ def add_enhanced_geothermal(
             lifetime=costs.at["geothermal", "lifetime"],
         )
 
-        # adding Organic Rankine Cycle as a single link
+        # adding Organic Rankine Cycle as a single link (adjusted for country-specific discount rate)
+        annuity_bus_orc = calculate_annuity(costs.at["organic rankine cycle", "lifetime"], dr_bus)
+        factor_orc = (annuity_bus_orc + FOM / (1.0 + FOM)) / (orc_annuity + FOM / (1.0 + FOM))
+        orc_capital_cost_bus = orc_capital_cost * factor_orc
         n.add(
             "Link",
             bus + " geothermal organic rankine cycle",
@@ -6014,7 +6353,7 @@ def add_enhanced_geothermal(
             bus1=bus,
             p_nom_extendable=True,
             carrier="geothermal organic rankine cycle",
-            capital_cost=orc_capital_cost * efficiency_orc,
+            capital_cost=orc_capital_cost_bus * efficiency_orc,
             efficiency=efficiency_orc,
             lifetime=costs.at["organic rankine cycle", "lifetime"],
         )
@@ -6026,7 +6365,7 @@ def add_enhanced_geothermal(
                 bus0=f"{bus} geothermal heat surface",
                 bus1=bus + " urban central heat",
                 carrier="geothermal district heat",
-                capital_cost=orc_capital_cost
+                capital_cost=orc_capital_cost_bus
                 * efficiency_orc
                 * costs.at["geothermal", "district heat surcharge"]
                 / 100.0,
@@ -6195,6 +6534,23 @@ if __name__ == "__main__":
         snakemake.params.costs,
         nyears=nyears,
     )
+    
+    # Load country-specific costs if configured
+    country_rates = snakemake.params.costs.get("local_discountrate", {})
+    country_specific_costs = {}
+    
+    if country_rates:
+        countries = snakemake.params.countries
+        
+        relevant_countries = set(country_rates) & set(countries)
+        for country in relevant_countries:
+            logger.info(f"Loading country-specific sector costs for: {country}")
+            country_specific_costs[country] = load_costs(
+                snakemake.input.costs,
+                snakemake.params.costs,
+                nyears=nyears,
+                country=country
+            )
 
     pop_weighted_energy_totals = (
         pd.read_csv(snakemake.input.pop_weighted_energy_totals, index_col=0) * nyears
@@ -6237,6 +6593,7 @@ if __name__ == "__main__":
                 costs=costs,
                 spatial=spatial,
                 options=options,
+                country_specific_costs=country_specific_costs,
                 cf_industry=cf_industry,
             )
 
@@ -6246,6 +6603,7 @@ if __name__ == "__main__":
         n,
         costs,
         options,
+        country_specific_costs=country_specific_costs,
         sequestration_potential_file=snakemake.input.sequestration_potential,
     )
 
@@ -6269,6 +6627,7 @@ if __name__ == "__main__":
         gas_input_nodes=gas_input_nodes,
         spatial=spatial,
         options=options,
+        country_specific_costs=country_specific_costs,
     )
 
     if options["transport"]:
@@ -6284,6 +6643,7 @@ if __name__ == "__main__":
             options=options,
             investment_year=investment_year,
             nodes=spatial.nodes,
+            country_specific_costs=country_specific_costs,
         )
 
     if options["heating"]:
@@ -6335,13 +6695,14 @@ if __name__ == "__main__":
             biomass_potentials_file=snakemake.input.biomass_potentials,
             biomass_transport_costs_file=snakemake.input.biomass_transport_costs,
             nyears=nyears,
+            country_specific_costs=country_specific_costs,
         )
 
     if options["ammonia"]:
-        add_ammonia(n, costs, pop_layout, spatial, cf_industry)
+        add_ammonia(n, costs, pop_layout, spatial, cf_industry, country_specific_costs)
 
     if options["methanol"]:
-        add_methanol(n, costs, options=options, spatial=spatial, pop_layout=pop_layout)
+        add_methanol(n, costs, options=options, spatial=spatial, pop_layout=pop_layout, country_specific_costs=country_specific_costs)
 
     if options["industry"]:
         add_industry(
@@ -6366,6 +6727,7 @@ if __name__ == "__main__":
             options=options,
             spatial=spatial,
             investment_year=investment_year,
+            country_specific_costs=country_specific_costs,
         )
 
     if options["aviation"]:
@@ -6376,10 +6738,11 @@ if __name__ == "__main__":
             pop_weighted_energy_totals=pop_weighted_energy_totals,
             options=options,
             spatial=spatial,
+            country_specific_costs=country_specific_costs,
         )
 
     if options["heating"]:
-        add_waste_heat(n, costs, options, cf_industry)
+        add_waste_heat(n, costs, options, cf_industry, country_specific_costs)
 
     if options["agriculture"]:  # requires H and I
         add_agriculture(
@@ -6390,6 +6753,7 @@ if __name__ == "__main__":
             investment_year,
             options,
             spatial,
+            country_specific_costs,
         )
 
     if options["dac"]:
@@ -6416,35 +6780,6 @@ if __name__ == "__main__":
     n = set_temporal_aggregation(
         n, snakemake.params.time_resolution, snakemake.input.snapshot_weightings
     )
-
-    # co2_budget = snakemake.params.co2_budget
-    # if isinstance(co2_budget, str) and co2_budget.startswith("cb"):
-    #     fn = "results/" + snakemake.params.RDIR + "/csvs/carbon_budget_distribution.csv"
-    #     if not os.path.exists(fn):
-    #         emissions_scope = snakemake.params.emissions_scope
-    #         input_co2 = snakemake.input.co2
-    #         build_carbon_budget(
-    #             co2_budget,
-    #             snakemake.input.eurostat,
-    #             fn,
-    #             emissions_scope,
-    #             input_co2,
-    #             options,
-    #             snakemake.params.countries,
-    #             snakemake.params.planning_horizons,
-    #         )
-    #     co2_cap = pd.read_csv(fn, index_col=0).squeeze()
-    #     limit = co2_cap.loc[investment_year]
-    # else:
-    #     limit = get(co2_budget, investment_year)
-    # add_co2limit(
-    #     n,
-    #     options,
-    #     snakemake.input.co2_totals_name,
-    #     snakemake.params.countries,
-    #     nyears,
-    #     limit,
-    # )
 
     maxext = snakemake.params["lines"]["max_extension"]
     if maxext is not None:

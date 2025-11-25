@@ -131,6 +131,27 @@ def calculate_annuity(n: float, r: float | pd.Series) -> float | pd.Series:
     else:
         return 1 / n
 
+def get_country_discount_rate(country_code: str, costs_config: dict) -> float:
+    """
+    Get the discount rate for a specific country.
+    
+    Parameters
+    ----------
+    country_code : str
+        ISO 2-letter country code (e.g., 'UA', 'DE')
+    costs_config : dict
+        Costs configuration from config file
+        
+    Returns
+    -------
+    float
+        Discount rate for the country
+    """
+    country_rates = costs_config.get("local_discountrate", {})
+    
+    rate = country_rates[country_code]
+    logger.info(f"Using country-specific discount rate for {country_code}: {rate:.1%}")
+    return rate
 
 def add_missing_carriers(n, carriers):
     """
@@ -214,7 +235,8 @@ def add_co2_emissions(n, costs, carriers):
 
 
 def load_costs(
-    cost_file: str, config: dict, max_hours: dict = None, nyears: float = 1.0
+    cost_file: str, config: dict, max_hours: dict = None, nyears: float = 1.0, 
+    country: str = None
 ) -> pd.DataFrame:
     """
     Load cost data from CSV and prepare it.
@@ -229,6 +251,8 @@ def load_costs(
         Dictionary specifying maximum hours for storage technologies
     nyears : float, optional
         Number of years for investment, by default 1.0
+    country : str, optional
+        ISO 2-letter country code for country-specific discount rates
 
     Returns
     -------
@@ -269,6 +293,13 @@ def load_costs(
             overwrites = pd.Series(overwrites)
             costs.loc[overwrites.index, attr] = overwrites
             logger.info(f"Overwriting {attr} with:\n{overwrites}")
+
+    if country is not None:
+        country_discount_rate = get_country_discount_rate(country, config)
+        costs["discount rate"] = country_discount_rate
+        logger.info(f"Using country-specific discount rate for {country}: {country_discount_rate:.1%}")
+    else:
+        costs["discount rate"] = config["social_discountrate"]
 
     annuity_factor = calculate_annuity(costs["lifetime"], costs["discount rate"])
     annuity_factor_fom = annuity_factor + costs["FOM"] / 100.0
@@ -324,6 +355,71 @@ def load_costs(
             logger.info(f"Overwriting {attr} with:\n{overwrites}")
 
     return costs
+
+
+def get_costs_for_bus(bus_name: str, costs: pd.DataFrame, country_specific_costs: dict, n) -> pd.DataFrame:
+    """
+    Get the appropriate cost DataFrame for a specific bus based on its country.
+
+    Parameters
+    ----------
+    bus_name : str
+        Name of the bus
+    costs : pd.DataFrame
+        Base cost DataFrame with global discount rates
+    country_specific_costs : dict
+        Dictionary mapping countries to their custom cost DataFrames
+    n : pypsa.Network
+        Network containing bus information
+        
+    Returns
+    -------
+    pd.DataFrame
+        Cost DataFrame for the bus (either country-specific or base costs)
+    """
+    try:
+        country = n.buses.at[bus_name, "country"]
+        if country in country_specific_costs:
+            return country_specific_costs[country]
+        else:
+            return costs
+    except KeyError:
+        logger.warning(f"Bus {bus_name} not found or missing country info. Using base costs.")
+        return costs
+
+
+def get_capital_cost_for_bus(bus_name: str, technology: str, costs: pd.DataFrame, 
+                            country_specific_costs: dict, n) -> float:
+    """
+    Get capital cost for a specific technology at a specific bus.
+    
+    Parameters
+    ----------
+    bus_name : str
+        Name of the bus
+    technology : str
+        Technology name (e.g., 'solar', 'wind', 'CCGT')
+    costs : pd.DataFrame
+        Base cost DataFrame with global discount rates
+    country_specific_costs : dict
+        Dictionary mapping countries to their custom cost DataFrames
+    n : pypsa.Network
+        Network containing bus information
+        
+    Returns
+    -------
+    float
+        Capital cost for the technology at the specified bus
+    """
+    try:
+        country = n.buses.at[bus_name, "country"]
+        if country in country_specific_costs:
+            return country_specific_costs[country].at[technology, "capital_cost"]
+        else:
+            return costs.at[technology, "capital_cost"]
+    except (KeyError, AttributeError):
+        logger.warning(f"Could not get capital cost for {technology} at bus {bus_name}. Using base costs.")
+        return costs.at[technology, "capital_cost"]
 
 
 def load_and_aggregate_powerplants(
@@ -517,6 +613,7 @@ def set_transmission_costs(
 def attach_wind_and_solar(
     n: pypsa.Network,
     costs: pd.DataFrame,
+    country_specific_costs: dict,
     profile_filenames: dict,
     carriers: list | set,
     extendable_carriers: list | set,
@@ -532,6 +629,8 @@ def attach_wind_and_solar(
         The PyPSA network to attach the generators to.
     costs : pd.DataFrame
         DataFrame containing the cost data.
+    country_specific_costs : dict
+        Dictionary mapping countries to their custom cost DataFrames.
     profile_filenames : dict
         Dictionary containing the paths to the wind and solar profiles.
     carriers : list | set
@@ -566,8 +665,10 @@ def attach_wind_and_solar(
 
             supcar = car.split("-", 2)[0]
             if supcar == "offwind":
+                buses = ds.indexes["bus_bin"].get_level_values("bus")
                 distance = ds["average_distance"].to_pandas()
                 distance.index = distance.index.map(flatten)
+                
                 submarine_cost = costs.at[car + "-connection-submarine", "capital_cost"]
                 underground_cost = costs.at[
                     car + "-connection-underground", "capital_cost"
@@ -578,26 +679,71 @@ def attach_wind_and_solar(
 
                 # Take 'offwind-float' capital cost for 'float', and 'offwind' capital cost for the rest ('ac' and 'dc')
                 midcar = car.split("-", 2)[1]
-                if midcar == "float":
-                    capital_cost = (
-                        costs.at[car, "capital_cost"]
-                        + costs.at[car + "-station", "capital_cost"]
-                        + connection_cost
-                    )
+                
+                bus_bins = ds.indexes["bus_bin"].map(flatten)
+                
+                # Calculate capital cost per bus considering country-specific discount rates
+                capital_cost = pd.Series(index=bus_bins, dtype=float)
+                if country_specific_costs:
+                    for i, bus in enumerate(buses):
+                        bus_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                        
+                        bus_connection_cost = 0
+                        for idx in connection_cost.index:
+                            if isinstance(idx, tuple) and idx[0] == bus:
+                                bus_connection_cost = connection_cost[idx]
+                                break
+                        if bus_connection_cost == 0:
+                            bus_connection_cost = connection_cost.mean()  # fallback
+                        
+                        if midcar == "float":
+                            capital_cost.iloc[i] = (
+                                bus_costs.at[car, "capital_cost"]
+                                + bus_costs.at[car + "-station", "capital_cost"]
+                                + bus_connection_cost
+                            )
+                        else:
+                            capital_cost.iloc[i] = (
+                                bus_costs.at["offwind", "capital_cost"]
+                                + bus_costs.at[car + "-station", "capital_cost"]
+                                + bus_connection_cost
+                            )
                 else:
-                    capital_cost = (
-                        costs.at["offwind", "capital_cost"]
-                        + costs.at[car + "-station", "capital_cost"]
-                        + connection_cost
-                    )
+                    for i, bus in enumerate(buses):
+                        bus_connection_cost = 0
+                        for idx in connection_cost.index:
+                            if isinstance(idx, tuple) and idx[0] == bus:
+                                bus_connection_cost = connection_cost[idx]
+                                break
+                        # if bus_connection_cost == 0:
+                        #     bus_connection_cost = connection_cost.mean()  # fallback
+                        
+                        if midcar == "float":
+                            capital_cost.iloc[i] = (
+                                costs.at[car, "capital_cost"]
+                                + costs.at[car + "-station", "capital_cost"]
+                                + bus_connection_cost
+                            )
+                        else:
+                            capital_cost.iloc[i] = (
+                                costs.at["offwind", "capital_cost"]
+                                + costs.at[car + "-station", "capital_cost"]
+                                + bus_connection_cost
+                            )
                 logger.info(
                     f"Added connection cost of {connection_cost.min():0.0f}-{connection_cost.max():0.0f} Eur/MW/a to {car}"
                 )
             else:
-                capital_cost = costs.at[car, "capital_cost"]
-
-            buses = ds.indexes["bus_bin"].get_level_values("bus")
-            bus_bins = ds.indexes["bus_bin"].map(flatten)
+                buses = ds.indexes["bus_bin"].get_level_values("bus")
+                bus_bins = ds.indexes["bus_bin"].map(flatten)
+                
+                if country_specific_costs:
+                    capital_cost = pd.Series(index=bus_bins, dtype=float)
+                    for i, bus in enumerate(buses):
+                        bus_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                        capital_cost.iloc[i] = bus_costs.at[car, "capital_cost"]
+                else:
+                    capital_cost = costs.at[car, "capital_cost"]
 
             p_nom_max = ds["p_nom_max"].to_pandas()
             p_nom_max.index = p_nom_max.index.map(flatten)
@@ -624,6 +770,7 @@ def attach_wind_and_solar(
 def attach_conventional_generators(
     n: pypsa.Network,
     costs: pd.DataFrame,
+    country_specific_costs: dict,
     ppl: pd.DataFrame,
     conventional_carriers: list,
     extendable_carriers: dict,
@@ -641,6 +788,8 @@ def attach_conventional_generators(
         The PyPSA network to attach the generators to.
     costs : pd.DataFrame
         DataFrame containing the cost data.
+    country_specific_costs : dict
+        Dictionary mapping countries to their custom cost DataFrames.
     ppl : pd.DataFrame
         DataFrame containing the power plant data.
     conventional_carriers : list
@@ -687,6 +836,19 @@ def attach_conventional_generators(
     else:
         marginal_cost = ppl.marginal_cost
 
+    # Calculate country-specific capital costs for each plant
+    if country_specific_costs:
+        # Use country-specific costs where available
+        capital_cost_list = []
+        for idx, plant in ppl.iterrows():
+            bus = plant['bus']
+            plant_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+            capital_cost_list.append(plant_costs.at[plant['carrier'], 'capital_cost'])
+        capital_cost = pd.Series(capital_cost_list, index=ppl.index)
+    else:
+        # Use base costs for all plants (more efficient)
+        capital_cost = ppl.carrier.map(costs['capital_cost'])
+
     # Define generators using modified ppl DataFrame
     caps = ppl.groupby("carrier").p_nom.sum().div(1e3).round(2)
     logger.info(f"Adding {len(ppl)} generators with capacities [GW]pp \n{caps}")
@@ -701,7 +863,7 @@ def attach_conventional_generators(
         p_nom_extendable=ppl.carrier.isin(extendable_carriers["Generator"]),
         efficiency=ppl.efficiency,
         marginal_cost=marginal_cost,
-        capital_cost=ppl.capital_cost,
+        capital_cost=capital_cost,
         build_year=ppl.build_year,
         lifetime=ppl.lifetime,
         **committable_attrs,
@@ -732,6 +894,7 @@ def attach_conventional_generators(
 def attach_hydro(
     n: pypsa.Network,
     costs: pd.DataFrame,
+    country_specific_costs: dict,
     ppl: pd.DataFrame,
     profile_hydro: str,
     hydro_capacities: str,
@@ -747,6 +910,8 @@ def attach_hydro(
         The PyPSA network to attach the hydro units to.
     costs : pd.DataFrame
         DataFrame containing the cost data.
+    country_specific_costs : dict
+        Dictionary mapping countries to their custom cost DataFrames.
     ppl : pd.DataFrame
         DataFrame containing the power plant data.
     profile_hydro : str
@@ -791,6 +956,17 @@ def attach_hydro(
             )
 
     if "ror" in carriers and not ror.empty:
+        # Calculate country-specific capital costs for RoR plants
+        if country_specific_costs:
+            ror_capital_cost_list = []
+            for idx, plant in ror.iterrows():
+                bus = plant['bus']
+                plant_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                ror_capital_cost_list.append(plant_costs.at['ror', 'capital_cost'])
+            ror_capital_cost = pd.Series(ror_capital_cost_list, index=ror.index)
+        else:
+            ror_capital_cost = pd.Series(costs.at['ror', 'capital_cost'], index=ror.index)
+            
         n.add(
             "Generator",
             ror.index,
@@ -798,7 +974,7 @@ def attach_hydro(
             bus=ror["bus"],
             p_nom=ror["p_nom"],
             efficiency=costs.at["ror", "efficiency"],
-            capital_cost=costs.at["ror", "capital_cost"],
+            capital_cost=ror_capital_cost.values if country_specific_costs else ror_capital_cost,
             weight=ror["p_nom"],
             p_max_pu=(
                 inflow_t[ror.index]  # pylint: disable=E0606
@@ -812,13 +988,25 @@ def attach_hydro(
         # assume no natural inflow due to lack of data
         max_hours = params.get("PHS_max_hours", 6)
         phs = phs.replace({"max_hours": {0: max_hours, np.nan: max_hours}})
+        
+        # Calculate country-specific capital costs for PHS
+        if country_specific_costs:
+            phs_capital_cost_list = []
+            for idx, plant in phs.iterrows():
+                bus = plant['bus']
+                plant_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                phs_capital_cost_list.append(plant_costs.at['PHS', 'capital_cost'])
+            phs_capital_cost = pd.Series(phs_capital_cost_list, index=phs.index)
+        else:
+            phs_capital_cost = pd.Series(costs.at['PHS', 'capital_cost'], index=phs.index)
+            
         n.add(
             "StorageUnit",
             phs.index,
             carrier="PHS",
             bus=phs["bus"],
             p_nom=phs["p_nom"],
-            capital_cost=costs.at["PHS", "capital_cost"],
+            capital_cost=phs_capital_cost.values if country_specific_costs else phs_capital_cost,
             max_hours=phs["max_hours"],
             efficiency_store=np.sqrt(costs.at["PHS", "efficiency"]),
             efficiency_dispatch=np.sqrt(costs.at["PHS", "efficiency"]),
@@ -878,6 +1066,16 @@ def attach_hydro(
         else:
             p_max_pu = 1
 
+        if country_specific_costs:
+            hydro_capital_cost_list = []
+            for idx, plant in hydro.iterrows():
+                bus = plant['bus']
+                plant_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                hydro_capital_cost_list.append(plant_costs.at['hydro', 'capital_cost'])
+            hydro_capital_cost = pd.Series(hydro_capital_cost_list, index=hydro.index)
+        else:
+            hydro_capital_cost = pd.Series(costs.at['hydro', 'capital_cost'], index=hydro.index)
+
         n.add(
             "StorageUnit",
             hydro.index,
@@ -885,7 +1083,7 @@ def attach_hydro(
             bus=hydro["bus"],
             p_nom=hydro["p_nom"],
             max_hours=hydro_max_hours,
-            capital_cost=costs.at["hydro", "capital_cost"],
+            capital_cost=hydro_capital_cost.values if country_specific_costs else hydro_capital_cost,
             marginal_cost=costs.at["hydro", "marginal_cost"],
             p_max_pu=p_max_pu,  # dispatch
             p_min_pu=0.0,  # store
@@ -1005,6 +1203,7 @@ def attach_storageunits(
     costs: pd.DataFrame,
     extendable_carriers: dict,
     max_hours: dict,
+    country_specific_costs: dict = None,
 ):
     """
     Attach storage units to the network.
@@ -1019,6 +1218,8 @@ def attach_storageunits(
         Dictionary of extendable energy carriers.
     max_hours : dict
         Dictionary of maximum hours for storage units.
+    country_specific_costs : dict, optional
+        Dictionary of country-specific cost data for different discount rates.
     """
     carriers = extendable_carriers["StorageUnit"]
 
@@ -1032,6 +1233,16 @@ def attach_storageunits(
     for carrier in carriers:
         roundtrip_correction = 0.5 if carrier == "battery" else 1
 
+        # Calculate country-specific capital costs for each bus
+        if country_specific_costs:
+            capital_costs_list = []
+            for bus in buses_i:
+                bus_costs = get_costs_for_bus(bus, costs, country_specific_costs, n)
+                capital_costs_list.append(bus_costs.at[carrier, 'capital_cost'])
+            capital_costs = pd.Series(capital_costs_list, index=buses_i)
+        else:
+            capital_costs = pd.Series(costs.at[carrier, 'capital_cost'], index=buses_i)
+
         n.add(
             "StorageUnit",
             buses_i,
@@ -1039,7 +1250,7 @@ def attach_storageunits(
             bus=buses_i,
             carrier=carrier,
             p_nom_extendable=True,
-            capital_cost=costs.at[carrier, "capital_cost"],
+            capital_cost=capital_costs.values if country_specific_costs else capital_costs,
             marginal_cost=costs.at[carrier, "marginal_cost"],
             efficiency_store=costs.at[lookup_store[carrier], "efficiency"]
             ** roundtrip_correction,
@@ -1054,6 +1265,7 @@ def attach_stores(
     n: pypsa.Network,
     costs: pd.DataFrame,
     extendable_carriers: dict,
+    country_specific_costs: dict = None,
 ):
     """
     Attach stores to the network.
@@ -1066,6 +1278,8 @@ def attach_stores(
         DataFrame containing the cost data.
     extendable_carriers : dict
         Dictionary of extendable energy carriers.
+    country_specific_costs : dict, optional
+        Dictionary of country-specific cost data for different discount rates.
     """
     carriers = extendable_carriers["Store"]
 
@@ -1076,6 +1290,26 @@ def attach_stores(
     if "H2" in carriers:
         h2_buses_i = n.add("Bus", buses_i + " H2", carrier="H2", location=buses_i)
 
+        if country_specific_costs:
+            h2_storage_capital_costs = []
+            electrolysis_capital_costs = []
+            fuel_cell_capital_costs = []
+            
+            for h2_bus, elec_bus in zip(h2_buses_i, buses_i):
+                bus_costs = get_costs_for_bus(elec_bus, costs, country_specific_costs, n)
+                h2_storage_capital_costs.append(bus_costs.at["hydrogen storage underground", "capital_cost"])
+                electrolysis_capital_costs.append(bus_costs.at["electrolysis", "capital_cost"])
+                fuel_cell_capital_costs.append(bus_costs.at["fuel cell", "capital_cost"] * bus_costs.at["fuel cell", "efficiency"])
+            
+            # Ensure Series indices match exactly by reindexing
+            h2_storage_capital_costs = pd.Series(h2_storage_capital_costs, index=h2_buses_i).reindex(h2_buses_i)
+            electrolysis_capital_costs = pd.Series(electrolysis_capital_costs, index=h2_buses_i).reindex(h2_buses_i)
+            fuel_cell_capital_costs = pd.Series(fuel_cell_capital_costs, index=h2_buses_i).reindex(h2_buses_i)
+        else:
+            h2_storage_capital_costs = costs.at["hydrogen storage underground", "capital_cost"]
+            electrolysis_capital_costs = costs.at["electrolysis", "capital_cost"]
+            fuel_cell_capital_costs = costs.at["fuel cell", "capital_cost"] * costs.at["fuel cell", "efficiency"]
+
         n.add(
             "Store",
             h2_buses_i,
@@ -1083,7 +1317,7 @@ def attach_stores(
             carrier="H2",
             e_nom_extendable=True,
             e_cyclic=True,
-            capital_cost=costs.at["hydrogen storage underground", "capital_cost"],
+            capital_cost=h2_storage_capital_costs.values if country_specific_costs else h2_storage_capital_costs,
         )
 
         n.add(
@@ -1094,7 +1328,7 @@ def attach_stores(
             carrier="H2 electrolysis",
             p_nom_extendable=True,
             efficiency=costs.at["electrolysis", "efficiency"],
-            capital_cost=costs.at["electrolysis", "capital_cost"],
+            capital_cost=electrolysis_capital_costs.values if country_specific_costs else electrolysis_capital_costs,
             marginal_cost=costs.at["electrolysis", "marginal_cost"],
         )
 
@@ -1106,9 +1340,7 @@ def attach_stores(
             carrier="H2 fuel cell",
             p_nom_extendable=True,
             efficiency=costs.at["fuel cell", "efficiency"],
-            # NB: fixed cost is per MWel
-            capital_cost=costs.at["fuel cell", "capital_cost"]
-            * costs.at["fuel cell", "efficiency"],
+            capital_cost=fuel_cell_capital_costs.values if country_specific_costs else fuel_cell_capital_costs,
             marginal_cost=costs.at["fuel cell", "marginal_cost"],
         )
 
@@ -1117,6 +1349,22 @@ def attach_stores(
             "Bus", buses_i + " battery", carrier="battery", location=buses_i
         )
 
+        if country_specific_costs:
+            battery_storage_capital_costs = []
+            battery_inverter_capital_costs = []
+            
+            for bat_bus, elec_bus in zip(b_buses_i, buses_i):
+                bus_costs = get_costs_for_bus(elec_bus, costs, country_specific_costs, n)
+                battery_storage_capital_costs.append(bus_costs.at["battery storage", "capital_cost"])
+                battery_inverter_capital_costs.append(bus_costs.at["battery inverter", "capital_cost"])
+            
+            battery_storage_capital_costs = pd.Series(battery_storage_capital_costs, index=b_buses_i)
+            battery_inverter_capital_costs = pd.Series(battery_inverter_capital_costs, index=b_buses_i)
+        else:
+            # Use scalar values for all buses (more efficient when no country-specific costs)
+            battery_storage_capital_costs = costs.at["battery storage", "capital_cost"]
+            battery_inverter_capital_costs = costs.at["battery inverter", "capital_cost"]
+
         n.add(
             "Store",
             b_buses_i,
@@ -1124,7 +1372,7 @@ def attach_stores(
             carrier="battery",
             e_cyclic=True,
             e_nom_extendable=True,
-            capital_cost=costs.at["battery storage", "capital_cost"],
+            capital_cost=battery_storage_capital_costs.values if country_specific_costs else battery_storage_capital_costs,
             marginal_cost=costs.at["battery", "marginal_cost"],
         )
 
@@ -1138,7 +1386,7 @@ def attach_stores(
             carrier="battery charger",
             # the efficiencies are "round trip efficiencies"
             efficiency=costs.at["battery inverter", "efficiency"] ** 0.5,
-            capital_cost=costs.at["battery inverter", "capital_cost"],
+            capital_cost=battery_inverter_capital_costs.values if country_specific_costs else battery_inverter_capital_costs,
             p_nom_extendable=True,
             marginal_cost=costs.at["battery inverter", "marginal_cost"],
         )
@@ -1184,6 +1432,23 @@ if __name__ == "__main__":
         max_hours,
         Nyears,
     )
+    
+    country_rates = params.costs.get("local_discountrate", {})
+    country_specific_costs = {}
+    
+    if country_rates:
+        countries = params.countries
+        
+        relevant_countries = set(country_rates) & set(countries)
+        for country in relevant_countries:
+            logger.info(f"Loading country-specific costs for: {country}")
+            country_specific_costs[country] = load_costs(
+                snakemake.input.tech_costs,
+                params.costs,
+                max_hours,
+                Nyears,
+                country=country
+            )
 
     ppl = load_and_aggregate_powerplants(
         snakemake.input.powerplants,
@@ -1230,6 +1495,7 @@ if __name__ == "__main__":
     attach_conventional_generators(
         n,
         costs,
+        country_specific_costs,
         ppl,
         conventional_carriers,
         extendable_carriers,
@@ -1242,6 +1508,7 @@ if __name__ == "__main__":
     attach_wind_and_solar(
         n,
         costs,
+        country_specific_costs,
         snakemake.input,
         renewable_carriers,
         extendable_carriers,
@@ -1255,6 +1522,7 @@ if __name__ == "__main__":
         attach_hydro(
             n,
             costs,
+            country_specific_costs,
             ppl,
             snakemake.input.profile_hydro,
             snakemake.input.hydro_capacities,
@@ -1283,8 +1551,8 @@ if __name__ == "__main__":
 
     update_p_nom_max(n)
 
-    attach_storageunits(n, costs, extendable_carriers, max_hours)
-    attach_stores(n, costs, extendable_carriers)
+    attach_storageunits(n, costs, extendable_carriers, max_hours, country_specific_costs)
+    attach_stores(n, costs, extendable_carriers, country_specific_costs)
 
     sanitize_carriers(n, snakemake.config)
     if "location" in n.buses:
