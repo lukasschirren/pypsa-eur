@@ -29,7 +29,16 @@ if __name__ == "__main__":
     demand = pd.read_csv(snakemake.input.demand, index_col=[0, 1])[
         "total international navigation"
     ]
-    demand = demand.xs(snakemake.params.energy_totals_year, level=1)
+    
+    # Use 2023 data for Ukraine, configured year for other countries
+    year = snakemake.params.energy_totals_year
+    ukraine_mask = demand.index.get_level_values(0) == "UA"
+    if ukraine_mask.any():
+        ua_demand = demand.loc[ukraine_mask].xs(2023, level=1)
+        other_demand = demand.loc[~ukraine_mask].xs(year, level=1)
+        demand = pd.concat([ua_demand, other_demand])
+    else:
+        demand = demand.xs(year, level=1)
 
     # read port data into GeoDataFrame
     with open(snakemake.input.ports, encoding="latin_1") as f:

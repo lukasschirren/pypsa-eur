@@ -40,7 +40,17 @@ if __name__ == "__main__":
     pop_layout = pd.read_csv(snakemake.input.clustered_pop_layout, index_col=0)
 
     totals = pd.read_csv(snakemake.input.energy_totals, index_col=[0, 1])
-    totals = totals.loc[idx[:, data_years], :].groupby("country").mean()
+    
+    # Use 2023 data for Ukraine, configured year for other countries
+    ukraine_mask = totals.index.get_level_values(0) == "UA"
+    if ukraine_mask.any():
+        ua_totals = totals.loc[ukraine_mask].xs(2023, level=1, drop_level=False)
+        other_totals = totals.loc[~ukraine_mask].loc[idx[:, data_years], :]
+        totals = pd.concat([ua_totals, other_totals])
+    else:
+        totals = totals.loc[idx[:, data_years], :]
+    
+    totals = totals.groupby("country").mean()
 
     nodal_totals = totals.loc[pop_layout.ct].fillna(0.0)
     nodal_totals.index = pop_layout.index

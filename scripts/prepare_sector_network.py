@@ -6578,7 +6578,17 @@ if __name__ == "__main__":
 
     fn = snakemake.input.heating_efficiencies
     year = int(snakemake.params["energy_totals_year"])
-    heating_efficiencies = pd.read_csv(fn, index_col=[1, 0]).loc[year]
+    heating_efficiencies = pd.read_csv(fn, index_col=[1, 0])
+    
+    # Use 2023 data for Ukraine, configured year for other countries
+    ukraine_mask = heating_efficiencies.index.get_level_values(0) == 2023
+    other_mask = heating_efficiencies.index.get_level_values(0) == year
+    if ukraine_mask.any() and "UA" in heating_efficiencies.index.get_level_values(1):
+        ua_eff = heating_efficiencies.loc[2023].loc[["UA"]]
+        other_eff = heating_efficiencies.loc[year].drop("UA", errors="ignore")
+        heating_efficiencies = pd.concat([ua_eff, other_eff])
+    else:
+        heating_efficiencies = heating_efficiencies.loc[year]
 
     spatial = define_spatial(pop_layout.index, options)
 
