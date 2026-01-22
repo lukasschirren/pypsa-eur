@@ -162,6 +162,68 @@ def add_missing_carriers(n, carriers):
         n.add("Carrier", missing_carriers)
 
 
+def is_generator_extendable(
+    carrier: str,
+    bus: str,
+    extendable_carriers: dict,
+    country_extendable_carriers: dict,
+    n: pypsa.Network,
+    component_type: str = "Generator"
+) -> bool:
+    """
+    Determine if a generator/store is extendable based on global and country-specific rules.
+    
+    Parameters
+    ----------
+    carrier : str
+        The carrier type (e.g., 'solar', 'onwind', 'CCGT')
+    bus : str
+        The bus name to which the component is connected
+    extendable_carriers : dict
+        Global extendable carriers configuration
+    country_extendable_carriers : dict
+        Country-specific extendable carriers configuration (country -> {component_type -> [carriers]})
+    n : pypsa.Network
+        The network object containing bus information
+    component_type : str, optional
+        Component type ('Generator', 'StorageUnit', 'Store', 'Link'), by default 'Generator'
+        
+    Returns
+    -------
+    bool
+        True if the component is extendable, False otherwise
+    """
+    # Check if component is in global extendable carriers
+    global_extendable = carrier in extendable_carriers.get(component_type, [])
+    
+    # If no country-specific rules exist, use global rules
+    if not country_extendable_carriers:
+        return global_extendable
+    
+    # Get country for the bus
+    try:
+        country = n.buses.at[bus, "country"]
+    except (KeyError, AttributeError):
+        # If country info not available, use global rules
+        return global_extendable
+    
+    # Check if there are country-specific rules for this country
+    if country in country_extendable_carriers:
+        country_rules = country_extendable_carriers[country]
+        country_extendable = carrier in country_rules.get(component_type, [])
+        logger.info(
+            f"Country-specific rule applied: {country} - {carrier} ({component_type}) "
+            f"extendable={country_extendable} (global would be {global_extendable})"
+        )
+        return country_extendable
+    
+    # If no country-specific rules for this country, use global rules
+    logger.debug(
+        f"Using global rules for {country}: {carrier} ({component_type}) -> {global_extendable}"
+    )
+    return global_extendable
+
+
 def sanitize_carriers(n, config):
     """
     Sanitize the carrier information in a PyPSA Network object.
@@ -616,7 +678,8 @@ def attach_wind_and_solar(
     country_specific_costs: dict,
     profile_filenames: dict,
     carriers: list | set,
-    extendable_carriers: list | set,
+    extendable_carriers: dict,
+    country_extendable_carriers: dict,
     line_length_factor: float = 1.0,
     landfall_lengths: dict = None,
 ) -> None:
@@ -635,8 +698,10 @@ def attach_wind_and_solar(
         Dictionary containing the paths to the wind and solar profiles.
     carriers : list | set
         List of renewable energy carriers to attach.
-    extendable_carriers : list | set
-        List of extendable renewable energy carriers.
+    extendable_carriers : dict
+        Global extendable carriers configuration.
+    country_extendable_carriers : dict
+        Country-specific extendable carriers configuration.
     line_length_factor : float, optional
         Factor to scale the line length, by default 1.0.
     landfall_lengths : dict, optional
@@ -751,13 +816,20 @@ def attach_wind_and_solar(
             p_max_pu = ds["profile"].to_pandas()
             p_max_pu.columns = p_max_pu.columns.map(flatten)
 
+            # Determine extendability for each generator based on its bus location
+            p_nom_extendable = pd.Series(index=bus_bins, dtype=bool)
+            for i, bus in enumerate(buses):
+                p_nom_extendable.iloc[i] = is_generator_extendable(
+                    car, bus, extendable_carriers, country_extendable_carriers, n, "Generator"
+                )
+
             n.add(
                 "Generator",
                 bus_bins,
                 suffix=" " + car,
                 bus=buses,
                 carrier=car,
-                p_nom_extendable=car in extendable_carriers["Generator"],
+                p_nom_extendable=p_nom_extendable,
                 p_nom_max=p_nom_max,
                 marginal_cost=costs.at[supcar, "marginal_cost"],
                 capital_cost=capital_cost,
@@ -774,6 +846,7 @@ def attach_conventional_generators(
     ppl: pd.DataFrame,
     conventional_carriers: list,
     extendable_carriers: dict,
+    country_extendable_carriers: dict,
     conventional_params: dict,
     conventional_inputs: dict,
     unit_commitment: pd.DataFrame = None,
@@ -849,6 +922,14 @@ def attach_conventional_generators(
         # Use base costs for all plants (more efficient)
         capital_cost = ppl.carrier.map(costs['capital_cost'])
 
+    # Determine extendability for each generator based on carrier and location
+    p_nom_extendable = pd.Series(index=ppl.index, dtype=bool)
+    for idx, plant in ppl.iterrows():
+        p_nom_extendable.loc[idx] = is_generator_extendable(
+            plant['carrier'], plant['bus'], extendable_carriers, 
+            country_extendable_carriers, n, "Generator"
+        )
+
     # Define generators using modified ppl DataFrame
     caps = ppl.groupby("carrier").p_nom.sum().div(1e3).round(2)
     logger.info(f"Adding {len(ppl)} generators with capacities [GW]pp \n{caps}")
@@ -860,7 +941,7 @@ def attach_conventional_generators(
         bus=ppl.bus,
         p_nom_min=ppl.p_nom.where(ppl.carrier.isin(conventional_carriers), 0),
         p_nom=ppl.p_nom.where(ppl.carrier.isin(conventional_carriers), 0),
-        p_nom_extendable=ppl.carrier.isin(extendable_carriers["Generator"]),
+        p_nom_extendable=p_nom_extendable,
         efficiency=ppl.efficiency,
         marginal_cost=marginal_cost,
         capital_cost=capital_cost,
@@ -1474,6 +1555,7 @@ if __name__ == "__main__":
 
     renewable_carriers = set(params.electricity["renewable_carriers"])
     extendable_carriers = params.electricity["extendable_carriers"]
+    country_extendable_carriers = params.electricity.get("country_extendable_carriers", {})
     conventional_carriers = params.electricity["conventional_carriers"]
     conventional_inputs = {
         k: v for k, v in snakemake.input.items() if k.startswith("conventional_")
@@ -1499,6 +1581,7 @@ if __name__ == "__main__":
         ppl,
         conventional_carriers,
         extendable_carriers,
+        country_extendable_carriers,
         params.conventional,
         conventional_inputs,
         unit_commitment=unit_commitment,
@@ -1512,6 +1595,7 @@ if __name__ == "__main__":
         snakemake.input,
         renewable_carriers,
         extendable_carriers,
+        country_extendable_carriers,
         params.line_length_factor,
         landfall_lengths,
     )
