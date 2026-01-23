@@ -78,6 +78,9 @@ logger = logging.getLogger(__name__)
 
 
 def add_custom_powerplants(ppl, custom_powerplants, custom_ppl_query=False):
+    # If custom_ppl_query is a path (ends with .csv), treat as True (include all)
+    if isinstance(custom_ppl_query, str) and custom_ppl_query.endswith(".csv"):
+        custom_ppl_query = True
     if not custom_ppl_query:
         return ppl
     add_ppls = pd.read_csv(custom_powerplants, dtype={"bus": "str"})

@@ -30,6 +30,17 @@ rule build_electricity_demand:
         "../scripts/build_electricity_demand.py"
 
 
+def input_custom_powerplants(w):
+    """
+    Allow custom_powerplants config to be a path or a boolean/query.
+    If it's a path ending in .csv, use that file. Otherwise use default.
+    """
+    custom_ppl = config_provider("electricity", "custom_powerplants")(w)
+    if isinstance(custom_ppl, str) and custom_ppl.endswith(".csv"):
+        return custom_ppl
+    return "data/custom_powerplants.csv"
+
+
 rule build_powerplants:
     params:
         powerplants_filter=config_provider("electricity", "powerplants_filter"),
@@ -38,7 +49,7 @@ rule build_powerplants:
         countries=config_provider("countries"),
     input:
         network=resources("networks/base_s_{clusters}.nc"),
-        custom_powerplants="data/custom_powerplants.csv",
+        custom_powerplants=input_custom_powerplants,
     output:
         resources("powerplants_s_{clusters}.csv"),
     log:
