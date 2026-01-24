@@ -1,0 +1,93 @@
+# -*- coding: utf-8 -*-
+# SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
+#
+# SPDX-License-Identifier: MIT
+
+# This file is used to define the scenarios that are run by snakemake. Each entry on the first level is a scenario. 
+# Each scenario can contain configuration overrides with respect to the config/config.yaml settings.
+
+##### CHANGE gas_network TO FALSE #####
+
+# post_war_y_5:
+#   # Year 5: Ukraine can expand most technologies except nuclear, coal, and hydro
+#   extendable_carriers:
+#     Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+#     StorageUnit: [] # battery, H2
+#     Store: [battery, H2]
+#     Link: [] # H2 pipeline
+
+#   # Country-specific extendable carriers for Ukraine (only applies to Generators)
+#   country_extendable_carriers:
+#     UA:
+#       Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, lignite, oil]
+
+#   powerplants_filter: (DateOut >= 2024 or DateOut != DateOut) and not (Country == 'Germany' and Fueltype == 'Nuclear')
+#   custom_powerplants: false
+#   everywhere_powerplants: []
+
+#   conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass, uranium]
+#   renewable_carriers: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, hydro]
+
+post_war_y_5: 
+  electricity:
+    extendable_carriers:
+      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+      StorageUnit: [] # battery, H2
+      Store: [battery, H2]
+      Link: [] # H2 pipeline
+
+
+post_war_y_4:
+
+  electricity:
+    extendable_carriers:
+      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+      StorageUnit: [] # battery, H2
+      Store: [battery, H2]
+      Link: [] # H2 pipeline
+    # Year 4: Ukraine - solar, wind, gas (no nuclear, coal, hydro)
+    country_extendable_carriers:
+      UA:
+        Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT]
+
+post_war_y_3:
+
+  electricity:
+    extendable_carriers:
+      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+      StorageUnit: [] # battery, H2
+      Store: [battery, H2]
+      Link: [] # H2 pipeline
+  
+    # Year 3: Ukraine - solar, wind only (no gas, nuclear, coal, hydro)
+    country_extendable_carriers:
+      UA:
+        Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float]
+
+post_war_y_2:
+  
+  electricity:
+    extendable_carriers:
+      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+      StorageUnit: [] # battery, H2
+      Store: [battery, H2]
+      Link: [] # H2 pipeline
+
+    # Year 2: Ukraine - solar, wind onshore only 
+    country_extendable_carriers:
+      UA:
+        Generator: [solar, solar-hsat, onwind]
+
+post_war_y_1:
+  
+  electricity:
+    extendable_carriers:
+      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+      StorageUnit: [] # battery, H2
+      Store: [battery, H2]
+      Link: [] # H2 pipeline
+
+    # Year 1: Ukraine - solar only (most restricted)
+    country_extendable_carriers:
+      UA:
+        Generator: [solar, solar-hsat]
