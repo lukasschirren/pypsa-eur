@@ -1505,6 +1505,7 @@ def add_generation(
     spatial: SimpleNamespace,
     options: dict,
     cf_industry: dict,
+    conventional_params: dict = None,
 ) -> None:
     """
     Add conventional electricity generation to the network.
@@ -1530,6 +1531,9 @@ def add_generation(
         Configuration dictionary containing settings for the model
     cf_industry : dict
         Dictionary of industrial conversion factors, needed for carrier buses
+    conventional_params : dict, optional
+        Dictionary of conventional generator parameters from config,
+        e.g., {'nuclear': {'p_max_pu': 'data/nuclear_p_max_pu.csv'}}
 
     Returns
     -------
@@ -1574,6 +1578,29 @@ def add_generation(
             efficiency2=costs.at[carrier, "CO2 intensity"],
             lifetime=costs.at[generator, "lifetime"],
         )
+
+        # Apply p_max_pu for generators with availability constraints (e.g., nuclear)
+        if conventional_params and generator in conventional_params:
+            gen_params = conventional_params[generator]
+            if "p_max_pu" in gen_params:
+                p_max_pu_value = gen_params["p_max_pu"]
+                link_names = nodes + " " + generator
+                
+                if isinstance(p_max_pu_value, str):
+                    # Read from file - country-specific values
+                    p_max_pu_df = pd.read_csv(p_max_pu_value, index_col=0)
+                    # Extract country codes from node names (first 2 characters)
+                    link_countries = pd.Series(nodes).str[:2]
+                    link_countries.index = link_names
+                    p_max_pu_series = link_countries.map(p_max_pu_df.iloc[:, 0])
+                    # Fill missing countries with 1.0 (no constraint)
+                    p_max_pu_series = p_max_pu_series.fillna(1.0)
+                    n.links.loc[link_names, "p_max_pu"] = p_max_pu_series.values
+                    logger.info(f"Applied country-specific p_max_pu for {generator} from {p_max_pu_value}")
+                else:
+                    # Single float value for all
+                    n.links.loc[link_names, "p_max_pu"] = p_max_pu_value
+                    logger.info(f"Applied p_max_pu={p_max_pu_value} for {generator}")
 
 
 def add_ammonia(
@@ -6625,6 +6652,7 @@ if __name__ == "__main__":
         spatial=spatial,
         options=options,
         cf_industry=cf_industry,
+        conventional_params=snakemake.params.get("conventional", {}),
     )
 
     add_storage_and_grids(

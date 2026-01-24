@@ -155,6 +155,7 @@ def add_power_capacities_installed_before_baseyear(
     capacity_threshold: float,
     lifetime_values: dict[str, float],
     renewable_carriers: list[str],
+    conventional_params: dict | None = None,
 ) -> None:
     """
     Add power generation capacities installed before base year.
@@ -179,6 +180,8 @@ def add_power_capacities_installed_before_baseyear(
         Default values for missing data
     renewable_carriers: list
         List of renewable carriers in the network
+    conventional_params : dict, optional
+        Conventional generation parameters including p_max_pu settings
     """
     logger.debug(f"Adding power capacities installed before {baseyear}")
 
@@ -359,11 +362,43 @@ def add_power_capacities_installed_before_baseyear(
                 n.links.loc[already_build, "p_nom_min"] = capacity.loc[
                     already_build.str.replace(name_suffix, "")
                 ].values
+                # Also apply p_max_pu for already built Links if configured
+                if (
+                    conventional_params is not None
+                    and generator in conventional_params
+                    and "p_max_pu" in conventional_params[generator]
+                ):
+                    p_max_pu_file = conventional_params[generator]["p_max_pu"]
+                    p_max_pu_df = pd.read_csv(p_max_pu_file, index_col=0)
+                    # Get country codes from the already_build index
+                    countries_already_build = already_build.str[:2]
+                    p_max_pu_values = countries_already_build.map(
+                        p_max_pu_df["factor"]
+                    ).fillna(1.0).values
+                    n.links.loc[already_build, "p_max_pu"] = p_max_pu_values
 
             if not new_build.empty:
                 new_capacity = capacity.loc[new_build.str.replace(name_suffix, "")]
 
                 if generator != "urban central solid biomass CHP":
+                    # Get p_max_pu for this generator if specified in conventional params
+                    p_max_pu_value = 1.0  # default
+                    if (
+                        conventional_params is not None
+                        and generator in conventional_params
+                        and "p_max_pu" in conventional_params[generator]
+                    ):
+                        p_max_pu_file = conventional_params[generator]["p_max_pu"]
+                        p_max_pu_df = pd.read_csv(p_max_pu_file, index_col=0)
+                        # Map countries from node names (first 2 characters)
+                        countries_in_capacity = new_capacity.index.str[:2]
+                        p_max_pu_value = countries_in_capacity.map(
+                            p_max_pu_df["factor"]
+                        ).fillna(1.0).values
+                        logger.info(
+                            f"Applied p_max_pu to existing {generator} Links from {p_max_pu_file}"
+                        )
+
                     n.add(
                         "Link",
                         new_capacity.index,
@@ -383,6 +418,7 @@ def add_power_capacities_installed_before_baseyear(
                         efficiency2=costs.at[carrier[generator], "CO2 intensity"],
                         build_year=grouping_year,
                         lifetime=lifetime_assets.loc[new_capacity.index],
+                        p_max_pu=p_max_pu_value,
                     )
                 else:
                     key = "central solid biomass CHP"
@@ -764,6 +800,7 @@ if __name__ == "__main__":
         capacity_threshold=snakemake.params.existing_capacities["threshold_capacity"],
         lifetime_values=snakemake.params.costs["fill_values"],
         renewable_carriers=renewable_carriers,
+        conventional_params=snakemake.params.get("conventional", None),
     )
 
     if options["heating"]:
