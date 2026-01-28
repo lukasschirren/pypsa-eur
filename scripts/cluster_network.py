@@ -176,7 +176,20 @@ def busmap_from_shapes(
         shapes = shapes.set_index(cluster_names)
         points = gpd.points_from_xy(**buses[["x", "y"]], crs=GEO_CRS)
         coords = gpd.GeoDataFrame(geometry=points, index=buses.index)
-        busmap = gpd.sjoin(coords, shapes, how="left")[cluster_names].rename("busmap")
+        joined = gpd.sjoin(coords, shapes, how="left")
+        # Handle column name conflict when coords index has same name as cluster_names
+        # geopandas renames conflicting index names to <name>_left and <name>_right
+        if cluster_names in joined.columns:
+            busmap = joined[cluster_names].rename("busmap")
+        elif f"{cluster_names}_right" in joined.columns:
+            busmap = joined[f"{cluster_names}_right"].rename("busmap")
+        elif "index_right" in joined.columns:
+            busmap = joined["index_right"].rename("busmap")
+        else:
+            raise KeyError(
+                f"Could not find cluster names column '{cluster_names}' in joined result. "
+                f"Available columns: {joined.columns.tolist()}"
+            )
 
         if busmap.isnull().any():
             unassigned = coords[busmap.isnull()]
@@ -660,6 +673,188 @@ if __name__ == "__main__":
             custom_busmap.index = custom_busmap.index.astype(str)
             logger.info(f"Imported custom busmap from {snakemake.input.custom_busmap}")
             busmap = custom_busmap
+        elif mode == "ukraine_custom":
+            # =================================================================
+            # UKRAINE CUSTOM MODE
+            # =================================================================
+            # This mode clusters Ukraine using predefined geographic shapes
+            # (e.g., IEA regions) while clustering all other countries using
+            # the standard algorithmic approach (kmeans/hac/modularity).
+            # 
+            # The logic is kept entirely within this block to avoid modifying
+            # the shared functions (busmap_for_n_clusters, distribute_n_clusters_to_countries)
+            # =================================================================
+            
+            # Load Ukraine custom shapes
+            ukraine_shapes = gpd.read_file(snakemake.input.ukraine_shapes)
+            logger.info(f"Loaded custom Ukraine shapes from {snakemake.input.ukraine_shapes}")
+            
+            # Standard setup
+            n_clusters = int(snakemake.wildcards.clusters)
+            algorithm = params.cluster_network["algorithm"]
+            features = None
+            
+            if algorithm == "hac":
+                features = get_feature_data_for_hac(snakemake.input.hac_features)
+                fix_country_assignment_for_hac(n)
+            
+            # Determine topology on full network (required for clustering algorithms)
+            n.determine_network_topology()
+            
+            # -----------------------------------------------------------------
+            # STEP 1: Cluster Ukrainian buses using geographic shapes
+            # -----------------------------------------------------------------
+            ukraine_buses = n.buses[n.buses.country == "UA"]
+            ukraine_busmap = busmap_from_shapes(
+                n,
+                ukraine_shapes,
+                buses=ukraine_buses,
+                cluster_names="name",
+            )
+            n_ukraine_clusters = ukraine_busmap.nunique()
+            logger.info(f"Clustered {len(ukraine_buses)} Ukrainian buses into {n_ukraine_clusters} regions")
+            
+            # -----------------------------------------------------------------
+            # STEP 2: Calculate remaining clusters for non-Ukraine countries
+            # -----------------------------------------------------------------
+            n_clusters_other = n_clusters - n_ukraine_clusters
+            
+            if n_clusters_other < 1:
+                logger.warning(
+                    f"Ukraine has {n_ukraine_clusters} clusters, but total is {n_clusters}. "
+                    f"Using all clusters for Ukraine only."
+                )
+                busmap = ukraine_busmap
+            else:
+                # Get non-Ukraine buses and their load
+                non_ukraine_buses = n.buses[n.buses.country != "UA"]
+                load_other = load[non_ukraine_buses.index]
+                
+                # Remove Ukraine from focus_weights if present
+                focus_weights_other = None
+                if params.focus_weights:
+                    focus_weights_other = {k: v for k, v in params.focus_weights.items() if k != "UA"}
+                    if not focus_weights_other:
+                        focus_weights_other = None
+                
+                # -----------------------------------------------------------------
+                # STEP 3: Distribute clusters to non-Ukraine countries
+                # (Inline version of distribute_n_clusters_to_countries)
+                # -----------------------------------------------------------------
+                L_other = (
+                    load_other.groupby([
+                        n.buses.loc[non_ukraine_buses.index, "country"], 
+                        n.buses.loc[non_ukraine_buses.index, "sub_network"]
+                    ])
+                    .sum()
+                    .pipe(normed)
+                )
+                
+                N_other = (
+                    n.buses.loc[non_ukraine_buses.index]
+                    .groupby(["country", "sub_network"])
+                    .size()[L_other.index]
+                )
+                
+                if n_clusters_other < len(N_other):
+                    raise ValueError(
+                        f"Number of clusters for non-Ukraine ({n_clusters_other}) must be >= "
+                        f"number of (country, sub_network) pairs ({len(N_other)})."
+                    )
+                
+                if isinstance(focus_weights_other, dict):
+                    total_focus = sum(list(focus_weights_other.values()))
+                    assert total_focus <= 1.0, "The sum of focus weights must be <= 1."
+                    for country, weight in focus_weights_other.items():
+                        if country in L_other.index.get_level_values("country"):
+                            L_other[country] = weight / len(L_other[country])
+                    remainder = [
+                        c not in focus_weights_other.keys() 
+                        for c in L_other.index.get_level_values("country")
+                    ]
+                    L_other[remainder] = L_other.loc[remainder].pipe(normed) * (1 - total_focus)
+                    logger.warning("Using custom focus weights for non-Ukraine cluster distribution.")
+                
+                # Solve cluster distribution optimization
+                m = linopy.Model()
+                clusters_var = m.add_variables(
+                    lower=1, upper=N_other, coords=[L_other.index], name="n", integer=True
+                )
+                m.add_constraints(clusters_var.sum() == n_clusters_other, name="tot")
+                m.objective = (clusters_var * clusters_var - 2 * clusters_var * L_other * n_clusters_other).sum()
+                
+                solver_name_temp = solver_name
+                if solver_name == "gurobi":
+                    logging.getLogger("gurobipy").propagate = False
+                elif solver_name not in ["scip", "cplex", "xpress", "copt", "mosek"]:
+                    logger.info(f"Solver `{solver_name}` doesn't support quadratic objectives. Using `scip`.")
+                    solver_name_temp = "scip"
+                
+                m.solve(solver_name=solver_name_temp)
+                n_clusters_c = m.solution["n"].to_series().astype(int)
+                logger.info(f"Cluster distribution for non-Ukraine: {n_clusters_c.to_dict()}")
+                
+                # -----------------------------------------------------------------
+                # STEP 4: Cluster non-Ukraine buses using standard algorithms
+                # (Inline version of busmap_for_n_clusters, only for non-UA)
+                # -----------------------------------------------------------------
+                algorithm_kwds = {}
+                if algorithm == "kmeans":
+                    algorithm_kwds = {
+                        "n_init": 1000,
+                        "max_iter": 30000,
+                        "tol": 1e-6,
+                        "random_state": 0,
+                    }
+                
+                other_busmaps = []
+                
+                for (country, sub_network), group in non_ukraine_buses.groupby(["country", "sub_network"]):
+                    key = (country, sub_network)
+                    if key not in n_clusters_c.index:
+                        logger.warning(f"Skipping {key} - not in cluster distribution")
+                        continue
+                    
+                    n_clust = n_clusters_c[key]
+                    prefix = f"{country}{sub_network} "
+                    
+                    logger.debug(
+                        f"Clustering {country}/{sub_network}: {len(group)} buses -> {n_clust} clusters"
+                    )
+                    
+                    if len(group) == 1:
+                        bm = pd.Series(prefix + "0", index=group.index)
+                    else:
+                        weight = weighting_for_country(group, load_other)
+                        
+                        if algorithm == "kmeans":
+                            bm = prefix + busmap_by_kmeans(
+                                n, weight, n_clust, buses_i=group.index, **algorithm_kwds
+                            )
+                        elif algorithm == "hac":
+                            features_subset = features.reindex(group.index, fill_value=0.0)
+                            bm = prefix + busmap_by_hac(
+                                n, n_clust, buses_i=group.index, feature=features_subset
+                            )
+                        elif algorithm == "modularity":
+                            bm = prefix + busmap_by_greedy_modularity(
+                                n, n_clust, buses_i=group.index
+                            )
+                        else:
+                            raise ValueError(f"Unknown algorithm: {algorithm}")
+                    
+                    other_busmaps.append(bm)
+                
+                other_busmap = pd.concat(other_busmaps)
+                logger.info(f"Clustered non-Ukraine buses into {other_busmap.nunique()} clusters")
+                
+                # -----------------------------------------------------------------
+                # STEP 5: Combine Ukraine and other country busmaps
+                # -----------------------------------------------------------------
+                busmap = pd.concat([ukraine_busmap, other_busmap])
+                
+            # Ensure busmap has proper index name for downstream compatibility
+            busmap.index.name = "name"
         else:
             n_clusters = int(snakemake.wildcards.clusters)
             algorithm = params.cluster_network["algorithm"]

@@ -678,6 +678,11 @@ rule cluster_network:
             == "hac"
             else []
         ),
+        ukraine_shapes=lambda w: (
+            "data/ukraine_iea_regions.geojson"
+            if config_provider("clustering", "mode")(w) == "ukraine_custom"
+            else []
+        ),
         load=resources("electricity_demand_base_s.nc"),
     output:
         network=resources("networks/base_s_{clusters}.nc"),

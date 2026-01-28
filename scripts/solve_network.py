@@ -468,6 +468,183 @@ def add_local_co2_constraint(n: pypsa.Network, local_co2: dict) -> None:
             name="local co2 emissions constraint " + country ,
         )
 
+def add_UA_fixed_electricity_generation_mix(n, base_year, generation_mix):
+    """
+    Add upper (and optionally lower) power generation limits for Ukraine in base year.
+    
+    This ensures the base year generation mix aligns with historical patterns,
+    preventing excessive renewable installation and ensuring gas utilization.
+    
+    Parameters
+    ----------
+    n : pypsa.Network
+        The PyPSA network instance
+    base_year : int
+        The base year for the model (e.g., 2025)
+    generation_mix : dict
+        Dictionary with carrier names as keys and [min, max] percentage ranges as values
+        
+    Example
+    -------
+    generation_mix = {
+        "nuclear": [45, 53],
+        "gas": [8, 13],
+        "solar": [0, 6]
+    }
+    """
+    investment_year = int(snakemake.wildcards.planning_horizons)
+    if investment_year > base_year:
+        logger.info("Planning year greater than base year, skipping UA generation mix constraint.")
+        return
+
+    logger.info("Adding Ukrainian fixed electricity generation mix for base year.")
+
+    # Calculate exogenous electricity load
+    elec_loads = n.loads.loc[n.loads.carrier.str.contains("electricity")]
+    ua_elec_loads = elec_loads.loc[elec_loads.index.str.contains("UA")]
+
+    if ua_elec_loads.empty:
+        logger.warning("No Ukrainian electricity loads found. Skipping UA generation mix constraint.")
+        return
+
+    load = (n.loads_t.p_set[ua_elec_loads.query("carrier == 'electricity'").index].sum().sum() + 
+            (ua_elec_loads.loc[ua_elec_loads.carrier != 'electricity'].p_set*len(n.snapshots)).sum()
+            )
+
+    # Additional electricity demand from sector-coupling
+    links_wo_transmission = n.links.drop(n.links.query("carrier == 'DC'").index)
+    electricity_buses = list(n.buses.query('carrier == "AC"').index) + list(
+        n.buses.query('carrier == "low voltage"').index
+    )
+    boolean_elec_demand_via_links = [
+        links_wo_transmission.bus0[i] in electricity_buses
+        for i in range(len(links_wo_transmission.bus0))
+    ]
+    boolean_elec_demand_via_links_series = pd.Series(boolean_elec_demand_via_links)
+    elec_demand_via_links = links_wo_transmission.iloc[
+        boolean_elec_demand_via_links_series[boolean_elec_demand_via_links_series].index
+    ]
+
+    # Drop storage dischargers as they are not a part of the generation mix
+    elec_demand_via_links = elec_demand_via_links.drop(
+        elec_demand_via_links.index[elec_demand_via_links.index.str.contains("discharge")]
+    )
+
+    # Drop distribution links
+    elec_demand_via_links = elec_demand_via_links.drop(
+        elec_demand_via_links.index[
+            elec_demand_via_links.index.str.contains("distribution")
+        ]
+    )
+
+    # Access data for Ukraine
+    elec_demand_via_links = elec_demand_via_links.loc[elec_demand_via_links.index.str.contains("UA")]
+
+    ua_electricity_demand = n.model.variables["Link-p"].loc[:, elec_demand_via_links.index].sum() + load
+
+    ua_buses = n.buses.loc[n.buses.index.str.contains("UA")].query("carrier == 'AC'")
+    
+    if ua_buses.empty:
+        logger.warning("No Ukrainian AC buses found. Skipping UA generation mix constraint.")
+        return
+
+    for carrier, c_range in generation_mix.items():
+
+        logger.info(f"Processing carrier: {carrier} with range {c_range[0]}-{c_range[1]}%")
+
+        # Handle renewable generators (wind, solar)
+        if carrier in ["wind", "solar", "onwind", "offwind", "offwind-ac", "offwind-dc", "offwind-float"]:
+
+            # Find generators matching carrier and country
+            ua_generators = n.generators.index[
+                n.generators.index.str.contains(carrier) & 
+                n.generators.index.str.contains("UA")
+            ]
+
+            # Drop solar thermal collectors (they're for heat, not electricity)
+            if carrier == "solar":
+                ua_generators = ua_generators.drop(
+                    ua_generators[ua_generators.str.contains("thermal")]
+                )
+
+            if ua_generators.empty:
+                logger.warning(f"No Ukrainian {carrier} generators found. Skipping {carrier} constraint.")
+                continue
+
+            lhs = n.model.variables["Generator-p"].loc[:, ua_generators].sum()
+
+        # Handle hydro generators (special case - could be StorageUnit or Generator)
+        elif carrier == "hydro":
+            # Check for hydro generators
+            ua_hydro_gens = n.generators.index[
+                (n.generators.carrier.isin(["ror", "hydro"])) & 
+                n.generators.index.str.contains("UA")
+            ]
+            
+            # Check for hydro storage units
+            ua_hydro_storage = n.storage_units.index[
+                (n.storage_units.carrier == "hydro") & 
+                n.storage_units.index.str.contains("UA")
+            ]
+
+            if ua_hydro_gens.empty and ua_hydro_storage.empty:
+                logger.warning(f"No Ukrainian hydro generation found. Skipping {carrier} constraint.")
+                continue
+
+            # Combine generation from generators and storage units
+            lhs_components = []
+            if not ua_hydro_gens.empty:
+                lhs_components.append(n.model.variables["Generator-p"].loc[:, ua_hydro_gens].sum())
+            if not ua_hydro_storage.empty:
+                lhs_components.append(n.model.variables["StorageUnit-p_dispatch"].loc[:, ua_hydro_storage].sum())
+            
+            if len(lhs_components) == 1:
+                lhs = lhs_components[0]
+            else:
+                lhs = lhs_components[0] + lhs_components[1]
+
+        # Handle conventional generators (nuclear, gas, coal, oil)
+        else:
+            ua_power_generation_links = n.links.loc[n.links.bus1.isin(ua_buses)]
+            
+            # Map carrier names to link patterns
+            if carrier == "gas":
+                carriers_pattern = "gas|OCGT|CCGT"
+            elif carrier == "oil":
+                carriers_pattern = "oil"
+            else:
+                carriers_pattern = carrier
+            
+            ua_power_generation_links = ua_power_generation_links.loc[
+                ua_power_generation_links.carrier.str.contains(carriers_pattern, case=False, na=False)
+            ]
+
+            if ua_power_generation_links.empty:
+                logger.warning(f"No Ukrainian {carrier} power generation links found. Skipping {carrier} constraint.")
+                continue
+
+            lhs = n.model.variables["Link-p"].loc[:, ua_power_generation_links.index].sum()
+
+        # Add upper limit constraint (always applied)
+        n.model.add_constraints(
+            lhs <= (ua_electricity_demand * c_range[1] / 100),
+            name=f"upper_generation_limit_UA_{carrier}",
+        )
+        logger.info(f"Added UPPER generation limit for UA {carrier}: {c_range[1]}% of demand")
+
+        # Add lower limit constraint (optional - only if min > 0)
+        # This is particularly important for gas to ensure it's utilized
+        if c_range[0] > 0:
+            n.model.add_constraints(
+                lhs >= (ua_electricity_demand * c_range[0] / 100),
+                name=f"lower_generation_limit_UA_{carrier}",
+            )
+            logger.info(f"Added LOWER generation limit for UA {carrier}: {c_range[0]}% of demand")
+
+        # Clean up
+        del lhs
+
+    logger.info("Completed Ukrainian generation mix constraints.")
 
 def add_co2_sequestration_limit(
     n: pypsa.Network,
@@ -1462,6 +1639,17 @@ def extra_functionality(
         logger.info("Adding local CO2 constraint.")
         add_local_co2_constraint(n, config["local_co2"])
 
+    # Ukrainian fixed electricity generation mix constraint
+    base_year = snakemake.config["scenario"]["planning_horizons"][0]
+    ua_settings = getattr(snakemake.params, "ua_settings", {})
+    if ua_settings.get("ua_fixed_electricity_generation_mix", False):
+        logger.info("Adding Ukrainian fixed electricity generation mix constraint.")
+        generation_mix = ua_settings.get("ua_generation_mix_2025", {})
+        if generation_mix:
+            add_UA_fixed_electricity_generation_mix(n, base_year, generation_mix)
+        else:
+            logger.warning("ua_fixed_electricity_generation_mix enabled but no ua_generation_mix_2025 defined in config.")
+    
     countries = snakemake.params.countries
     local_co2_countries = config["local_co2"].keys() if config["local_co2"] is not False else False
 

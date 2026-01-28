@@ -80,6 +80,9 @@ countries:
 - SK
 - XK
 
+ua_settings:
+  ua_fixed_electricity_generation_mix: false
+
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#snapshots
 snapshots:
   start: "2013-01-01"
