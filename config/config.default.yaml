@@ -834,6 +834,11 @@ sector:
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#industry
 industry:
+  endogenous_steel: false
+  relocation_steel: false
+  steel_cc: false
+  steel_import: 531 # in €/t (https://www.nature.com/articles/s41467-025-60652-1)
+  steel_transport_cost: 0.1151 # [€/t/km] from https://della.eu/prices/local/ read on the 22st of January 2026
   St_primary_fraction:
     2020: 0.6
     2025: 0.55
