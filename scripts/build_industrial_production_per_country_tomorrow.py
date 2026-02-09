@@ -79,6 +79,57 @@ if __name__ == "__main__":
         - production["Integrated steelworks"]
     )
 
+    # Ukraine-specific steel production override
+    ua_steel_config = params.get("ua_steel_production", {})
+    ua_primary_config = params.get("ua_St_primary_fraction", {})
+    ua_dri_config = params.get("ua_DRI_fraction", {})
+    
+    if ua_steel_config or ua_primary_config or ua_dri_config:
+        ua_mask = production.index.str.startswith("UA")
+        
+        # Get Ukraine-specific fractions (fall back to global if not specified)
+        ua_st_primary = get(ua_primary_config, investment_year) if ua_primary_config else None
+        if ua_st_primary is None:
+            ua_st_primary = st_primary_fraction
+        
+        ua_dri = get(ua_dri_config, investment_year) if ua_dri_config else None
+        if ua_dri is None:
+            ua_dri = dri_fraction
+        
+        # Apply Ukraine-specific primary/secondary and DRI split if different from global
+        if ua_primary_config or ua_dri_config:
+            ua_total_steel = production.loc[ua_mask, ["Electric arc", "Integrated steelworks", "DRI + Electric arc"]].sum(axis=1)
+            ua_primary_steel = ua_total_steel * ua_st_primary
+            ua_secondary_steel = ua_total_steel * (1 - ua_st_primary)
+            
+            # Distribute primary between DRI and Integrated steelworks using Ukraine-specific DRI_fraction
+            production.loc[ua_mask, "DRI + Electric arc"] = ua_primary_steel * ua_dri
+            production.loc[ua_mask, "Integrated steelworks"] = ua_primary_steel * (1 - ua_dri)
+            production.loc[ua_mask, "Electric arc"] = ua_secondary_steel
+            
+            logger.info(f"Applied Ukraine-specific fractions: primary={ua_st_primary:.1%}, DRI={ua_dri:.1%} for {investment_year}")
+        
+        # Then scale to match target demand if specified
+        if ua_steel_config:
+            ua_steel_demand = get(ua_steel_config, investment_year)
+            if ua_steel_demand is not None:
+                ua_rows = production.loc[ua_mask]
+                ua_total = ua_rows[["Electric arc", "Integrated steelworks", "DRI + Electric arc"]].sum().sum()
+
+                if ua_total > 0:
+                    scale_factor = ua_steel_demand / ua_total
+                    for col in ["Electric arc", "Integrated steelworks", "DRI + Electric arc"]:
+                        production.loc[ua_mask, col] *= scale_factor
+                else:
+                    # If no existing steel, distribute based on technology fractions
+                    n_ua_nodes = ua_mask.sum()
+                    per_node = ua_steel_demand / n_ua_nodes
+                    production.loc[ua_mask, "DRI + Electric arc"] = per_node * ua_dri * ua_st_primary
+                    production.loc[ua_mask, "Integrated steelworks"] = per_node * (1 - ua_dri) * ua_st_primary
+                    production.loc[ua_mask, "Electric arc"] = per_node * (1 - ua_st_primary)
+
+                logger.info(f"Set Ukraine steel production to {ua_steel_demand} kt/a for {investment_year}")
+
     keys = ["Aluminium - primary production", "Aluminium - secondary production"]
     total_aluminium = production[keys].sum(axis=1)
 
