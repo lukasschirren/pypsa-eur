@@ -605,7 +605,7 @@ def add_UA_fixed_electricity_generation_mix(n, base_year, generation_mix):
 
         # Handle conventional generators (nuclear, gas, coal, oil)
         else:
-            ua_power_generation_links = n.links.loc[n.links.bus1.isin(ua_buses)]
+            ua_power_generation_links = n.links.loc[n.links.bus1.isin(ua_buses.index)]
             
             # Map carrier names to link patterns
             if carrier == "gas":

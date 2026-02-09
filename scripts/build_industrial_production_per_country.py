@@ -183,9 +183,16 @@ def get_energy_ratio(country, eurostat_dir, jrc_dir, year, snakemake):
         ct_eurostat = country.replace("GB", "UK")
         # estimate physical output, energy consumption in the sector and country
         fn = f"{eurostat_dir}/{ct_eurostat}-Energy-balance-sheets-April-2023-edition.xlsb"
+        
+        # Use 2023 data for Ukraine (has data up to 2023), 2019 max for others
+        if country == "UA":
+            sheet_year = "2023"  # Ukraine Eurostat has 2023 as latest
+        else:
+            sheet_year = str(min(2019, year))
+        
         df = pd.read_excel(
             fn,
-            sheet_name=str(min(2019, year)),
+            sheet_name=sheet_year,
             index_col=2,
             header=0,
             skiprows=4,
@@ -286,12 +293,22 @@ def separate_basic_chemicals(demand, year):
 
     demand["Ammonia"] = 0.0
 
-    year_to_use = min(max(year, 2018), 2022)
-    if year_to_use != year:
-        logger.info(
-            f"Year {year} outside data range. Using data from {year_to_use} for ammonia production."
-        )
-    demand.loc[there, "Ammonia"] = ammonia.loc[there, str(year_to_use)]
+    # Always use the highest available year (2022) for ammonia production data
+    year_to_use = 2022
+    logger.info(f"Using ammonia production data from {year_to_use} (highest available year).")
+    
+    # Fill missing values for specific year with last available data
+    year_col = str(year_to_use)
+    for country in there:
+        if pd.isna(ammonia.loc[country, year_col]):
+            # Find last available year for this country
+            available = ammonia.loc[country].dropna()
+            if len(available) > 0:
+                fallback_year = available.index[-1]
+                ammonia.loc[country, year_col] = available[fallback_year]
+                logger.info(f"Using {fallback_year} ammonia data for {country} (missing {year_col})")
+    
+    demand.loc[there, "Ammonia"] = ammonia.loc[there, year_col]
 
     demand["Basic chemicals"] -= demand["Ammonia"]
 
