@@ -1284,6 +1284,7 @@ rule prepare_sector_network:
         planning_horizons=config_provider("scenario", "planning_horizons"),
         countries=config_provider("countries"),
         adjustments=config_provider("adjustments", "sector"),
+        transmission_capacity_adjustment=config_provider("transmission_capacity_adjustment", default={}),
         emissions_scope=config_provider("energy", "emissions"),
         biomass=config_provider("biomass"),
         RDIR=RDIR,

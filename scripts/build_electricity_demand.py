@@ -264,9 +264,10 @@ if __name__ == "__main__":
         time_diff = pd.Timestamp("2018") - pd.Timestamp(snapshot_year)
         # hack indices (currently, UA is manually set to 2018)
         load_ua.index -= time_diff
-        # load["UA"] = load_ua
-        # # Scale Ukraine demand from 154.81 TWh (2018) to 105.208 TWh (IEA - electricity production)
-        ua_scaling_factor = 109.8 / 154.81  # Approximately 0.68
+        # Scale Ukraine demand from 2018 baseline (154.81 TWh) to configured target
+        ua_demand_twh = snakemake.params.load.get("ua_electricity_demand", 109.8)
+        ua_scaling_factor = ua_demand_twh / 154.81
+        logger.info(f"Scaling UA demand to {ua_demand_twh} TWh (factor: {ua_scaling_factor:.4f})")
         load["UA"] = load_ua * ua_scaling_factor
         # attach load of MD (no time-series available, use 2020-totals and distribute according to UA):
         # https://www.iea.org/data-and-statistics/data-browser/?country=MOLDOVA&fuel=Energy%20consumption&indicator=TotElecCons

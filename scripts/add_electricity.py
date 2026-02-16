@@ -1208,6 +1208,9 @@ def attach_GEM_renewables(
         caps = caps.groupby(["bus", "bin"]).Capacity.sum()
         caps.index = caps.index.map(flatten) + " " + carrier
 
+        # Exclude Ukraine due to uncertainty
+        caps = caps[~caps.index.str.startswith("UA")]
+
         n.generators.update({"p_nom": caps.dropna()})
         n.generators.update({"p_nom_min": caps.dropna()})
 
@@ -1252,6 +1255,8 @@ def estimate_renewable_capacities(
 
     for ppm_technology, tech in tech_map.items():
         tech_i = n.generators.query("carrier == @tech").index
+        # Exclude Ukraine due to uncertainty
+        tech_i = tech_i[~tech_i.str.startswith("UA")]
         if ppm_technology in capacities.index.get_level_values("Technology"):
             stats = capacities.loc[ppm_technology].reindex(countries, fill_value=0.0)
         else:

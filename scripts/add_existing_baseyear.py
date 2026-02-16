@@ -368,13 +368,19 @@ def add_power_capacities_installed_before_baseyear(
                     and generator in conventional_params
                     and "p_max_pu" in conventional_params[generator]
                 ):
-                    p_max_pu_file = conventional_params[generator]["p_max_pu"]
-                    p_max_pu_df = pd.read_csv(p_max_pu_file, index_col=0)
-                    # Get country codes from the already_build index
+                    p_max_pu_source = conventional_params[generator]["p_max_pu"]
                     countries_already_build = already_build.str[:2]
-                    p_max_pu_values = countries_already_build.map(
-                        p_max_pu_df["factor"]
-                    ).fillna(1.0).values
+                    if isinstance(p_max_pu_source, dict):
+                        p_max_pu_values = countries_already_build.map(
+                            p_max_pu_source
+                        ).fillna(1.0).values
+                    elif isinstance(p_max_pu_source, str):
+                        p_max_pu_df = pd.read_csv(p_max_pu_source, index_col=0)
+                        p_max_pu_values = countries_already_build.map(
+                            p_max_pu_df["factor"]
+                        ).fillna(1.0).values
+                    else:
+                        p_max_pu_values = p_max_pu_source
                     n.links.loc[already_build, "p_max_pu"] = p_max_pu_values
 
             if not new_build.empty:
@@ -388,15 +394,21 @@ def add_power_capacities_installed_before_baseyear(
                         and generator in conventional_params
                         and "p_max_pu" in conventional_params[generator]
                     ):
-                        p_max_pu_file = conventional_params[generator]["p_max_pu"]
-                        p_max_pu_df = pd.read_csv(p_max_pu_file, index_col=0)
-                        # Map countries from node names (first 2 characters)
+                        p_max_pu_source = conventional_params[generator]["p_max_pu"]
                         countries_in_capacity = new_capacity.index.str[:2]
-                        p_max_pu_value = countries_in_capacity.map(
-                            p_max_pu_df["factor"]
-                        ).fillna(1.0).values
+                        if isinstance(p_max_pu_source, dict):
+                            p_max_pu_value = countries_in_capacity.map(
+                                p_max_pu_source
+                            ).fillna(1.0).values
+                        elif isinstance(p_max_pu_source, str):
+                            p_max_pu_df = pd.read_csv(p_max_pu_source, index_col=0)
+                            p_max_pu_value = countries_in_capacity.map(
+                                p_max_pu_df["factor"]
+                            ).fillna(1.0).values
+                        else:
+                            p_max_pu_value = p_max_pu_source
                         logger.info(
-                            f"Applied p_max_pu to existing {generator} Links from {p_max_pu_file}"
+                            f"Applied p_max_pu to existing {generator} Links"
                         )
 
                     n.add(

@@ -1544,6 +1544,8 @@ def add_generation(
     conventional_params : dict, optional
         Dictionary of conventional generator parameters from config,
         e.g., {'nuclear': {'p_max_pu': 'data/nuclear_p_max_pu.csv'}}
+        p_max_pu accepts a file path (str), a single float, or a dict
+        of country-code -> factor, e.g. {'FR': 0.5, 'GB': 0.7}
 
     Returns
     -------
@@ -1607,6 +1609,15 @@ def add_generation(
                     p_max_pu_series = p_max_pu_series.fillna(1.0)
                     n.links.loc[link_names, "p_max_pu"] = p_max_pu_series.values
                     logger.info(f"Applied country-specific p_max_pu for {generator} from {p_max_pu_value}")
+                elif isinstance(p_max_pu_value, dict):
+                    # Inline dict of country-code -> factor, e.g. {FR: 0.5, GB: 0.7}
+                    link_countries = pd.Series(nodes).str[:2]
+                    link_countries.index = link_names
+                    p_max_pu_series = link_countries.map(p_max_pu_value)
+                    # Fill missing countries with 1.0 (no constraint)
+                    p_max_pu_series = p_max_pu_series.fillna(1.0)
+                    n.links.loc[link_names, "p_max_pu"] = p_max_pu_series.values
+                    logger.info(f"Applied inline country-specific p_max_pu for {generator}: {p_max_pu_value}")
                 else:
                     # Single float value for all
                     n.links.loc[link_names, "p_max_pu"] = p_max_pu_value
@@ -6205,6 +6216,102 @@ def remove_h2_network(n):
         n.stores.drop("EU H2 Store", inplace=True)
 
 
+def adjust_transmission_capacity_by_country(n, transmission_capacity_adjustment):
+    """
+    Adjust transmission line capacities for a specific country.
+
+    Separately scales domestic lines (both endpoints in the country) and
+    interconnection lines (one endpoint in the country, one in a neighbour).
+
+    Parameters
+    ----------
+    n : pypsa.Network
+    transmission_capacity_adjustment : dict
+        Configuration dict, e.g.::
+
+            country: UA
+            domestic: 1.1      # +10 %
+            interconnection: 0.9  # -10 %
+    """
+    if not transmission_capacity_adjustment:
+        return
+
+    country = transmission_capacity_adjustment.get("country")
+    domestic_factor = transmission_capacity_adjustment.get("domestic", 1.0)
+    interconn_factor = transmission_capacity_adjustment.get("interconnection", 1.0)
+
+    if country is None:
+        logger.warning("transmission_capacity_adjustment: no 'country' specified, skipping.")
+        return
+
+    if domestic_factor == 1.0 and interconn_factor == 1.0:
+        return
+
+    logger.info(
+        f"Adjusting transmission capacity for {country}: "
+        f"domestic factor={domestic_factor}, interconnection factor={interconn_factor}"
+    )
+
+    # Helper: resolve country code for a bus name
+    def bus_country(bus_name):
+        if bus_name in n.buses.index and "country" in n.buses.columns:
+            c = n.buses.loc[bus_name, "country"]
+            if pd.notna(c):
+                return c
+        # Fallback: first two characters of bus name
+        return bus_name[:2] if len(bus_name) >= 2 else None
+
+    def _scale_line_attr(df, mask, attr, factor):
+        """Scale a line/link attribute by factor, only if the column exists."""
+        if attr in df.columns and mask.any():
+            df.loc[mask, attr] *= factor
+
+    # --- AC lines ---
+    if not n.lines.empty:
+        c0 = n.lines.bus0.map(bus_country)
+        c1 = n.lines.bus1.map(bus_country)
+
+        domestic_mask = (c0 == country) & (c1 == country)
+        interconn_mask = ((c0 == country) & (c1 != country)) | ((c1 == country) & (c0 != country))
+
+        n_dom = domestic_mask.sum()
+        n_int = interconn_mask.sum()
+
+        if n_dom and domestic_factor != 1.0:
+            for attr in ["s_nom", "s_nom_min", "s_nom_max"]:
+                _scale_line_attr(n.lines, domestic_mask, attr, domestic_factor)
+            logger.info(f"  Scaled {n_dom} domestic AC lines by {domestic_factor}")
+        if n_int and interconn_factor != 1.0:
+            for attr in ["s_nom", "s_nom_min", "s_nom_max"]:
+                _scale_line_attr(n.lines, interconn_mask, attr, interconn_factor)
+            logger.info(f"  Scaled {n_int} interconnection AC lines by {interconn_factor}")
+
+    # --- DC links ---
+    dc_mask = n.links.carrier == "DC" if not n.links.empty else pd.Series(dtype=bool)
+    if dc_mask.any():
+        dc = n.links.loc[dc_mask]
+        c0 = dc.bus0.map(bus_country)
+        c1 = dc.bus1.map(bus_country)
+
+        dom_idx = dc.index[(c0 == country) & (c1 == country)]
+        int_idx = dc.index[
+            ((c0 == country) & (c1 != country)) | ((c1 == country) & (c0 != country))
+        ]
+
+        # Build boolean masks aligned to n.links.index
+        dom_dc = n.links.index.isin(dom_idx)
+        int_dc = n.links.index.isin(int_idx)
+
+        if dom_dc.any() and domestic_factor != 1.0:
+            for attr in ["p_nom", "p_nom_min", "p_nom_max"]:
+                _scale_line_attr(n.links, dom_dc, attr, domestic_factor)
+            logger.info(f"  Scaled {dom_dc.sum()} domestic DC links by {domestic_factor}")
+        if int_dc.any() and interconn_factor != 1.0:
+            for attr in ["p_nom", "p_nom_min", "p_nom_max"]:
+                _scale_line_attr(n.links, int_dc, attr, interconn_factor)
+            logger.info(f"  Scaled {int_dc.sum()} interconnection DC links by {interconn_factor}")
+
+
 def limit_individual_line_extension(n, maxext):
     logger.info(f"Limiting new HVAC and HVDC extensions to {maxext} MW")
     n.lines["s_nom_max"] = n.lines["s_nom"] + maxext
@@ -7124,6 +7231,10 @@ if __name__ == "__main__":
 
     maybe_adjust_costs_and_potentials(
         n, snakemake.params["adjustments"], investment_year
+    )
+
+    adjust_transmission_capacity_by_country(
+        n, snakemake.params.get("transmission_capacity_adjustment", {})
     )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
