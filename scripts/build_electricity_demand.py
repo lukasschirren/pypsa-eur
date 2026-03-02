@@ -265,7 +265,20 @@ if __name__ == "__main__":
         # hack indices (currently, UA is manually set to 2018)
         load_ua.index -= time_diff
         # Scale Ukraine demand from 2018 baseline (154.81 TWh) to configured target
-        ua_demand_twh = snakemake.params.load.get("ua_electricity_demand", 109.8)
+        ua_demand_config = snakemake.params.load.get("ua_electricity_demand", 109.8)
+        # Support both scalar and year-indexed dict formats
+        if isinstance(ua_demand_config, dict):
+            # Use the first (lowest) year's value for the base demand profile;
+            # year-specific rescaling happens in prepare_sector_network.py
+            base_year = min(ua_demand_config.keys())
+            ua_demand_twh = ua_demand_config[base_year]
+            logger.info(
+                f"ua_electricity_demand is year-indexed; using base year {base_year} "
+                f"value ({ua_demand_twh} TWh) for demand profile shape. "
+                f"Year-specific rescaling applied in prepare_sector_network."
+            )
+        else:
+            ua_demand_twh = ua_demand_config
         ua_scaling_factor = ua_demand_twh / 154.81
         logger.info(f"Scaling UA demand to {ua_demand_twh} TWh (factor: {ua_scaling_factor:.4f})")
         load["UA"] = load_ua * ua_scaling_factor

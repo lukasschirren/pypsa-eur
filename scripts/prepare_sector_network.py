@@ -5089,7 +5089,80 @@ def add_industry(
                 efficiency2=costs.at["coal", "CO2 intensity"],
                 lifetime = BF_BOF_lifetime,
             )
-    
+
+        # Ukraine greenfield steel: existing BF-BOF as brownfield + greenfield DRI/EAF
+        if cf_industry.get("ua_greenfield_steel", False):
+            ua_existing_bfbof_kta = cf_industry["ua_existing_bfbof"]  # kt/a
+            ua_nodes_mask = nodes.str.startswith("UA")
+            ua_node_names = nodes[ua_nodes_mask]
+            base_year = cf_industry.get("_base_year", investment_year)
+            is_base_year = (investment_year == base_year)
+
+            if len(ua_node_names) > 0:
+                logger.info(
+                    f"Ukraine greenfield steel ({investment_year}, "
+                    f"{'base year' if is_base_year else 'brownfield year'}): "
+                    f"{ua_existing_bfbof_kta} kt/a existing BF-BOF, "
+                    "new DRI/EAF capacity determined by optimizer."
+                )
+
+                # --- DRI routes: greenfield for UA (p_nom=0, extendable=True) ---
+                for suffix in [" steel H2 DRI", " steel gas DRI"]:
+                    ua_link_names = ua_node_names + suffix
+                    ua_link_idx = ua_link_names.intersection(n.links.index)
+                    if not ua_link_idx.empty:
+                        n.links.loc[ua_link_idx, "p_nom"] = 0
+                        n.links.loc[ua_link_idx, "p_nom_extendable"] = True
+                        logger.info(f"  {len(ua_link_idx)} UA{suffix} links set to greenfield extendable")
+
+                # --- BF-BOF: existing capacity in base year only ---
+                # In subsequent years, set p_nom=0 so brownfield carries the
+                # existing BF-BOF from the base year (avoids accumulation).
+                ua_bfbof_names = ua_node_names + " steel BF-BOF"
+                ua_bfbof_idx = ua_bfbof_names.intersection(n.links.index)
+                if not ua_bfbof_idx.empty:
+                    if is_base_year:
+                        # Base year: set existing BF-BOF capacity
+                        # Convert existing capacity: kt/a -> t/h
+                        ua_existing_t_h = ua_existing_bfbof_kta * 1e3 * nyears / nhours
+
+                        # Distribute proportionally to each UA node's steel demand share
+                        ua_steel_keys = ua_node_names + " steel"
+                        ua_steel_demand = steel.reindex(ua_steel_keys).fillna(0)
+                        ua_total_demand = ua_steel_demand.sum()
+
+                        if ua_total_demand > 0:
+                            ua_shares = (ua_steel_demand / ua_total_demand).values
+                        else:
+                            ua_shares = np.full(len(ua_node_names), 1.0 / len(ua_node_names))
+
+                        # p_nom in coal input terms (MW_coal) = t_steel/h * MWh_coal/t_steel
+                        ua_bfbof_capacity = pd.Series(
+                            ua_shares * ua_existing_t_h * BF_BOF_coal_input,
+                            index=ua_bfbof_names,
+                        )
+                        n.links.loc[ua_bfbof_idx, "p_nom"] = ua_bfbof_capacity.loc[ua_bfbof_idx]
+                        n.links.loc[ua_bfbof_idx, "p_nom_extendable"] = False
+                        logger.info(
+                            f"  Base year: {len(ua_bfbof_idx)} UA BF-BOF links set to fixed "
+                            f"{ua_existing_bfbof_kta} kt/a ({ua_existing_t_h:.1f} t/h total)"
+                        )
+                    else:
+                        # Subsequent years: no new BF-BOF (brownfield carries existing)
+                        n.links.loc[ua_bfbof_idx, "p_nom"] = 0
+                        n.links.loc[ua_bfbof_idx, "p_nom_extendable"] = False
+                        logger.info(
+                            f"  Brownfield year: {len(ua_bfbof_idx)} UA BF-BOF links set to "
+                            "p_nom=0 (existing capacity carried by brownfield)"
+                        )
+
+                # --- EAF: greenfield for UA (p_nom=0, extendable already True) ---
+                ua_eaf_names = ua_node_names + " steel EAF"
+                ua_eaf_idx = ua_eaf_names.intersection(n.links.index)
+                if not ua_eaf_idx.empty:
+                    n.links.loc[ua_eaf_idx, "p_nom"] = 0
+                    logger.info(f"  {len(ua_eaf_idx)} UA EAF links reset to greenfield (p_nom=0)")
+
     n.add(
         "Bus",
         spatial.biomass.industry,
@@ -6312,6 +6385,98 @@ def adjust_transmission_capacity_by_country(n, transmission_capacity_adjustment)
             logger.info(f"  Scaled {int_dc.sum()} interconnection DC links by {interconn_factor}")
 
 
+def override_interconnection_capacities(n, override_config, investment_year=None):
+    """
+    Override cross-border interconnection capacities with absolute MW values.
+
+    Parameters
+    ----------
+    n : pypsa.Network
+    override_config : dict or list
+        If a dict, expects keys:
+            - apply_years (optional): list of years to apply overrides in.
+              If omitted or empty, applies in all years.
+            - overrides: list of dicts with bus0, bus1, s_nom/p_nom.
+        If a list (legacy format), treated as the overrides list directly.
+    investment_year : int, optional
+        Current planning horizon year. Used with apply_years to decide
+        whether to apply the overrides.
+    """
+    if not override_config:
+        return
+
+    # Support both new dict format and legacy list format
+    if isinstance(override_config, list):
+        overrides = override_config
+        apply_years = []
+    else:
+        apply_years = override_config.get("apply_years", [])
+        overrides = override_config.get("overrides", [])
+
+    if not overrides:
+        return
+
+    # Check year filter
+    if apply_years and investment_year is not None:
+        if investment_year not in apply_years:
+            logger.info(
+                f"Skipping interconnection capacity overrides: "
+                f"year {investment_year} not in apply_years {apply_years}"
+            )
+            return
+
+    logger.info(
+        f"Applying {len(overrides)} interconnection capacity overrides "
+        f"(year={investment_year})"
+    )
+
+    for entry in overrides:
+        b0 = entry.get("bus0")
+        b1 = entry.get("bus1")
+        s_nom = entry.get("s_nom")
+        p_nom = entry.get("p_nom")
+
+        if b0 is None or b1 is None:
+            logger.warning(f"  Skipping override with missing bus0/bus1: {entry}")
+            continue
+
+        # --- AC lines (match in either direction) ---
+        if s_nom is not None and not n.lines.empty:
+            mask = (
+                ((n.lines.bus0 == b0) & (n.lines.bus1 == b1)) |
+                ((n.lines.bus0 == b1) & (n.lines.bus1 == b0))
+            )
+            n_matches = mask.sum()
+            if n_matches > 0:
+                old_val = n.lines.loc[mask, "s_nom"].values
+                n.lines.loc[mask, "s_nom"] = s_nom
+                n.lines.loc[mask, "s_nom_min"] = s_nom
+                if "s_nom_max" in n.lines.columns:
+                    # Keep s_nom_max at least as large as s_nom
+                    n.lines.loc[mask, "s_nom_max"] = n.lines.loc[mask, "s_nom_max"].clip(lower=s_nom)
+                logger.info(f"  AC line {b0} <-> {b1}: {old_val} -> {s_nom} MW ({n_matches} line(s))")
+            else:
+                logger.warning(f"  No AC line found for {b0} <-> {b1}")
+
+        # --- DC links (match in either direction) ---
+        if p_nom is not None and not n.links.empty:
+            dc = n.links[n.links.carrier == "DC"]
+            mask_dc = (
+                ((dc.bus0 == b0) & (dc.bus1 == b1)) |
+                ((dc.bus0 == b1) & (dc.bus1 == b0))
+            )
+            if mask_dc.any():
+                idx = dc.index[mask_dc]
+                old_val = n.links.loc[idx, "p_nom"].values
+                n.links.loc[idx, "p_nom"] = p_nom
+                n.links.loc[idx, "p_nom_min"] = p_nom
+                if "p_nom_max" in n.links.columns:
+                    n.links.loc[idx, "p_nom_max"] = n.links.loc[idx, "p_nom_max"].clip(lower=p_nom)
+                logger.info(f"  DC link {b0} <-> {b1}: {old_val} -> {p_nom} MW ({mask_dc.sum()} link(s))")
+            else:
+                logger.warning(f"  No DC link found for {b0} <-> {b1}")
+
+
 def limit_individual_line_extension(n, maxext):
     logger.info(f"Limiting new HVAC and HVDC extensions to {maxext} MW")
     n.lines["s_nom_max"] = n.lines["s_nom"] + maxext
@@ -6910,6 +7075,10 @@ if __name__ == "__main__":
 
     investment_year = int(snakemake.wildcards.planning_horizons)
 
+    # Pass base year for greenfield steel logic (needed to avoid brownfield accumulation)
+    if cf_industry.get("ua_greenfield_steel", False):
+        cf_industry["_base_year"] = int(snakemake.params.planning_horizons[0])
+
     n = pypsa.Network(snakemake.input.network)
 
     pop_layout = pd.read_csv(snakemake.input.clustered_pop_layout, index_col=0)
@@ -6962,6 +7131,26 @@ if __name__ == "__main__":
         if "landfall_length" in settings.keys()
     }
     patch_electricity_network(n, costs, carriers_to_keep, profiles, landfall_lengths)
+
+    # Rescale Ukraine electricity demand for the current planning horizon
+    ua_demand_config = snakemake.params.load.get("ua_electricity_demand", None)
+    if ua_demand_config is not None and isinstance(ua_demand_config, dict):
+        ua_loads = n.loads.index[
+            n.loads.index.str.contains("UA") & (n.loads.carrier == "electricity")
+        ]
+        if not ua_loads.empty:
+            # The base demand was built using the first year's value;
+            # rescale to the current planning horizon's target
+            base_year = min(ua_demand_config.keys())
+            base_demand_twh = ua_demand_config[base_year]
+            target_demand_twh = get(ua_demand_config, investment_year)
+            rescale_factor = target_demand_twh / base_demand_twh
+            n.loads_t.p_set.loc[:, ua_loads] *= rescale_factor
+            logger.info(
+                f"Rescaled UA electricity demand for {investment_year}: "
+                f"{base_demand_twh} TWh (base {base_year}) -> {target_demand_twh} TWh "
+                f"(factor: {rescale_factor:.4f})"
+            )
 
     fn = snakemake.input.heating_efficiencies
     year = int(snakemake.params["energy_totals_year"])
@@ -7235,6 +7424,11 @@ if __name__ == "__main__":
 
     adjust_transmission_capacity_by_country(
         n, snakemake.params.get("transmission_capacity_adjustment", {})
+    )
+
+    override_interconnection_capacities(
+        n, snakemake.params.get("interconnection_capacity_override", {}),
+        investment_year=investment_year,
     )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
