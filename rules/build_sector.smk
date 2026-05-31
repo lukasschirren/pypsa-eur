@@ -923,6 +923,8 @@ rule build_industrial_production_per_node:
 
 
 rule build_industrial_energy_demand_per_node:
+    params:
+        industry=config_provider("industry"),
     input:
         industry_sector_ratios=resources(
             "industry_sector_ratios_{planning_horizons}.csv"

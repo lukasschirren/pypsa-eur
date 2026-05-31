@@ -4862,6 +4862,8 @@ def add_industry(
                    "Integrated steelworks"]
 
         no_relocation = not cf_industry["relocation_steel"]
+        base_year = cf_industry.get("_base_year", investment_year)
+        is_base_year = (investment_year == base_year)
 
         s = " not" if no_relocation else ""
         logger.info(f"Steel industry relocation{s} activated.")
@@ -4900,7 +4902,7 @@ def add_industry(
         )
 
         logger.info("Adding steel imports.")
-        if cf_industry.get("steel_import", False):
+        if cf_industry.get("steel_import") not in (None, False):
             n.add(
                 "Generator",
                 spatial.steel.nodes,
@@ -4944,8 +4946,8 @@ def add_industry(
         )
 
         # Adding DRI-EAF routes
-        dri_electricity_input = {"H2": costs.at["hydrogen direct iron reduction furnace", "electricity-input"], 
-                                 "gas": costs.at["hydrogen direct iron reduction furnace", "electricity-input"]}
+        # Note: only H2 DRI has an electricity-input entry in costs; gas DRI has no electricity-input
+        dri_electricity_input = {"H2": costs.at["hydrogen direct iron reduction furnace", "electricity-input"]}
         
         fuel_input = {"H2": costs.at["hydrogen direct iron reduction furnace", "hydrogen-input"], 
                       "gas": costs.at["natural gas direct iron reduction furnace", "gas-input"]}
@@ -4962,17 +4964,19 @@ def add_industry(
 
         for fuel in ["H2", "gas"]:
             p_nom = (
-                    steel
+                    industrial_production["DRI + Electric arc"]
+                    / nhours
                     * EAF_hbi_input
                     * fuel_input[fuel]
                     )
- 
-            p_nom.index += f" {fuel} DRI"
+
+            p_nom.index = nodes + f" steel {fuel} DRI"
  
             logger.info(f"For {fuel}, adding {p_nom} of capacities.")
  
             if fuel == "H2":
-                marginal_cost = DRI_commodity * DRI_ore_input["H2"] / dri_electricity_input["H2"]
+                # marginal cost = ore cost expressed per MWh_H2 (primary fuel of bus0)
+                marginal_cost = DRI_commodity * DRI_ore_input["H2"] / fuel_input["H2"]
                 n.add(
                     "Link",
                     nodes,
@@ -4981,12 +4985,14 @@ def add_industry(
                     capital_cost=DRI_fixed_cost["H2"]
                     / fuel_input["H2"],
                     marginal_cost=marginal_cost,
-                    p_nom=p_nom if no_relocation else 0,
+                    p_nom=p_nom if (no_relocation and is_base_year) else 0,
                     p_nom_extendable=False if no_relocation else True,
                     p_min_pu=0,
                     bus0=nodes + " H2",
                     bus1=spatial.hbi.nodes,
+                    bus2=nodes,
                     efficiency=1 / fuel_input["H2"],
+                    efficiency2=-dri_electricity_input["H2"] / fuel_input["H2"],
                     lifetime = DRI_lifetimes["H2"],
                 )
  
@@ -4999,7 +5005,7 @@ def add_industry(
                     carrier="gas DRI",
                     capital_cost=DRI_fixed_cost["gas"] / fuel_input["gas"],
                     marginal_cost=marginal_cost,
-                    p_nom=p_nom if no_relocation else 0,
+                    p_nom=p_nom if (no_relocation and is_base_year) else 0,
                     p_nom_extendable=False if no_relocation else True,
                     p_min_pu=0,
                     bus0=spatial.gas.nodes,
@@ -5011,13 +5017,26 @@ def add_industry(
                     )
 
                 if cf_industry["steel_cc"]:
+                    # Using cement capture parameters as proxy for gas DRI CC.
+                    # DRI off-gas has higher CO2 concentration (~25-50%) than cement (~14-33%),
+                    # so this slightly overestimates capture cost.
+                    # TODO: replace with DRI-specific CC data when available in costs DB.
                     capture_rate = costs.at["cement capture", "capture_rate"]
+                    gas_co2 = costs.at["gas", "CO2 intensity"]
+                    # Parasitic electricity for capture + compression (MWh_el/tCO2)
+                    cc_elec_per_tco2 = (
+                        costs.at["cement capture", "electricity-input"]
+                        + costs.at["cement capture", "compression-electricity-input"]
+                    )
                     n.add(
                         "Link",
                         nodes,
                         suffix=" steel gas DRI CC",
                         carrier="gas DRI CC",
-                        capital_cost=DRI_fixed_cost["gas"] / fuel_input["gas"] + costs.at["cement capture", "capital_cost"],
+                        capital_cost=(
+                            DRI_fixed_cost["gas"] / fuel_input["gas"]
+                            + costs.at["cement capture", "capital_cost"] * gas_co2
+                        ),
                         marginal_cost=marginal_cost,
                         p_nom=0,
                         p_nom_extendable=True,
@@ -5025,10 +5044,14 @@ def add_industry(
                         bus0=spatial.gas.nodes,
                         bus1=spatial.hbi.nodes,
                         bus2="co2 atmosphere",
-                        efficiency = 1 / fuel_input["gas"],
-                        efficiency2 = costs.at["gas", "CO2 intensity"] * (1 - capture_rate),
+                        bus3=spatial.co2.nodes,
+                        bus4=nodes,
+                        efficiency=1 / fuel_input["gas"],
+                        efficiency2=gas_co2 * (1 - capture_rate),
+                        efficiency3=gas_co2 * capture_rate,
+                        efficiency4=-cc_elec_per_tco2 * gas_co2 * capture_rate,
                         lifetime=DRI_lifetimes["gas"],
-                        )
+                    )
                     
         # Adding steel produced from HBI via electric arc furnace
         p_nom = industrial_production["Electric arc"] * EAF_electricity_input / nhours
@@ -5043,7 +5066,7 @@ def add_industry(
             suffix=" steel EAF",
             carrier="EAF",
             capital_cost=costs.at["electric arc furnace", "capital_cost"] / EAF_electricity_input,
-            p_nom=p_nom if no_relocation else 0,
+            p_nom=p_nom if (no_relocation and is_base_year) else 0,
             p_nom_extendable=True, # to account for increasing DRI, expansion of EAF is enabled (but only where steel industry is already located)
             p_min_pu=0,
             bus0=nodes,
@@ -5067,9 +5090,9 @@ def add_industry(
                         / BF_BOF_coal_input
                         )
 
-        p_nom = steel * BF_BOF_coal_input
+        p_nom = industrial_production["Integrated steelworks"] / nhours * BF_BOF_coal_input
 
-        p_nom.index += " BF-BOF"
+        p_nom.index = nodes + " steel BF-BOF"
 
         logger.info(f"For BF-BOF, adding {p_nom} of capacity.")
 
@@ -5080,7 +5103,7 @@ def add_industry(
                 carrier="BF-BOF",
                 capital_cost = BF_BOF_fixed_cost / BF_BOF_coal_input,
                 marginal_cost=marginal_cost,
-                p_nom=p_nom if no_relocation else 0,
+                p_nom=p_nom if (no_relocation and is_base_year) else 0,
                 p_nom_extendable=False if no_relocation else True,
                 bus0=spatial.coal.nodes,
                 bus1=spatial.steel.nodes,
@@ -5090,24 +5113,247 @@ def add_industry(
                 lifetime = BF_BOF_lifetime,
             )
 
+        # BF-BOF CC retrofit (post-combustion capture bolted onto existing BF-BOF plants)
+        # Sized per-node in tCO2/h, exposed via the electricity bus as bus0 (like DAC).
+        # Gas input is for solvent regeneration; captured CO2 goes to co2 storage.
+        # Using cement capture parameters as proxy. BF-BOF off-gas CO2 concentration
+        # (~25%) is higher than cement (~14-33%), so capture cost may be slightly
+        # overestimated. TODO: replace with BF-BOF-specific data when available.
+        if cf_industry["steel_cc"]:
+            CC_el_input   = costs.at["steel carbon capture retrofit", "electricity-input"]  # MWh_el/tCO2
+            CC_gas_input  = costs.at["steel carbon capture retrofit", "gas-input"]          # MWh_gas/tCO2
+            CC_capture_rate = costs.at["steel carbon capture retrofit", "capture_rate"]     # per unit
+            CC_lifetime   = costs.at["steel carbon capture retrofit", "lifetime"]           # years
+            # capital_cost is annualised EUR/(tCO2/h); convert to EUR/MW_el by × el_input
+            CC_capital_cost = costs.at["steel carbon capture retrofit", "capital_cost"] * CC_el_input
+
+            n.add(
+                "Link",
+                nodes,
+                suffix=" steel BF-BOF CC retrofit",
+                carrier="BF-BOF CC retrofit",
+                capital_cost=CC_capital_cost,
+                p_nom=0,
+                p_nom_extendable=True,
+                p_min_pu=0,
+                bus0=nodes,                  # electricity (primary input, p_nom in MW_el)
+                bus1=spatial.gas.nodes,      # gas consumed for solvent regen (negative = consumes)
+                bus2="co2 atmosphere",       # removes CO2 from atmosphere (negative = consumes)
+                bus3=spatial.co2.nodes,      # stores captured CO2 (positive = produces)
+                efficiency=-CC_gas_input / CC_el_input,      # MWh_gas consumed per MWh_el
+                efficiency2=-CC_capture_rate / CC_el_input,  # tCO2 removed per MWh_el
+                efficiency3=CC_capture_rate / CC_el_input,   # tCO2 stored per MWh_el
+                lifetime=CC_lifetime,
+            )
+            logger.info("Added BF-BOF CC retrofit links (extendable, p_nom=0) for all nodes.")
+
+            # Cap CC retrofit p_nom_max at every node by the CO2 output of its BF-BOF.
+            # Allows only as much CC as there is BF-BOF to capture from.
+            # UA nodes may be overridden later by their own greenfield block.
+            # p_nom_max (MW_el) = p_nom_bfbof (MW_coal) × coal_CO2 (tCO2/MWh) × CC_el (MWh_el/tCO2)
+            coal_co2_intensity = costs.at["coal", "CO2 intensity"]  # tCO2/MWh_coal
+            bfbof_idx = nodes + " steel BF-BOF"
+            bfbof_pnom = n.links.loc[bfbof_idx.intersection(n.links.index), "p_nom"]
+            # Build a Series indexed by BF-BOF CC retrofit link names
+            cc_pnom_max_global = bfbof_pnom.rename(
+                index=lambda x: x.replace(" steel BF-BOF", " steel BF-BOF CC retrofit")
+            ) * coal_co2_intensity * CC_el_input
+            cc_valid = cc_pnom_max_global.index.intersection(n.links.index)
+            n.links.loc[cc_valid, "p_nom_max"] = cc_pnom_max_global.reindex(cc_valid).values
+            logger.info(
+                f"Set BF-BOF CC retrofit p_nom_max for {len(cc_valid)} nodes "
+                f"(total {cc_pnom_max_global.sum():.1f} MW_el from BF-BOF CO2 output)."
+            )
+
+        # BF-BOF → gas DRI retrofit: converts existing BF-BOF sites to natural gas DRI
+        # at a fraction of greenfield cost. p_nom_max is set system-wide from BF-BOF
+        # capacity so every node with BF-BOF can use this transition, not just Ukraine.
+        if cf_industry.get("steel_retrofit_dri", False):
+            retrofit_cost_fraction = cf_industry.get("steel_retrofit_dri_cost_fraction", 0.65)
+            retrofit_capital_cost = DRI_fixed_cost["gas"] * retrofit_cost_fraction / fuel_input["gas"]
+            retrofit_marginal_cost = DRI_commodity * DRI_ore_input["gas"] / fuel_input["gas"]
+
+            n.add(
+                "Link",
+                nodes,
+                suffix=" steel BF-BOF to DRI retrofit",
+                carrier="BF-BOF to DRI retrofit",
+                capital_cost=retrofit_capital_cost,
+                marginal_cost=retrofit_marginal_cost,
+                p_nom=0,
+                p_nom_max=0,  # set below from BF-BOF p_nom (system-wide)
+                p_nom_extendable=True,
+                p_min_pu=0,
+                bus0=spatial.gas.nodes,
+                bus1=spatial.hbi.nodes,
+                bus2="co2 atmosphere",
+                efficiency=1 / fuel_input["gas"],
+                efficiency2=costs.at["gas", "CO2 intensity"],
+                lifetime=DRI_lifetimes["gas"],
+            )
+
+            # p_nom_max (MW_gas) = t_steel/h × EAF_hbi_input × fuel_input["gas"]
+            #   where t_steel/h = p_nom_bfbof (MW_coal) / BF_BOF_coal_input
+            _bfbof_idx_dri = nodes + " steel BF-BOF"
+            bfbof_pnom_dri = n.links.loc[
+                _bfbof_idx_dri.intersection(n.links.index), "p_nom"
+            ]
+            dri_ret_pnom_max = bfbof_pnom_dri.rename(
+                index=lambda x: x.replace(" steel BF-BOF", " steel BF-BOF to DRI retrofit")
+            ) / BF_BOF_coal_input * EAF_hbi_input * fuel_input["gas"]
+            dri_ret_valid = dri_ret_pnom_max.index.intersection(n.links.index)
+            n.links.loc[dri_ret_valid, "p_nom_max"] = dri_ret_pnom_max.reindex(dri_ret_valid).values
+            logger.info(
+                f"Added BF-BOF to DRI retrofit links (system-wide p_nom_max "
+                f"total {dri_ret_pnom_max.sum():.1f} MW_gas, "
+                f"cost fraction={retrofit_cost_fraction:.0%} of greenfield gas DRI)."
+            )
+
+        # Gas DRI → H2 DRI retrofit: converts existing gas DRI plants to use hydrogen.
+        # Same bus topology as H2 DRI (bus0=H2, bus1=HBI) but at reduced capital cost.
+        # p_nom_max=0 initially; add_brownfield.py sets it per-node based on
+        # the existing gas DRI capacity carried forward from previous periods.
+        if cf_industry.get("steel_retrofit_h2dri", False):
+            h2_retrofit_cost_frac = cf_industry.get("steel_retrofit_h2dri_cost_fraction", 0.30)
+            h2_retrofit_capital = DRI_fixed_cost["H2"] * h2_retrofit_cost_frac / fuel_input["H2"]
+            h2_retrofit_marginal = DRI_commodity * DRI_ore_input["H2"] / fuel_input["H2"]
+
+            n.add(
+                "Link",
+                nodes,
+                suffix=" steel gas DRI to H2 DRI retrofit",
+                carrier="gas DRI to H2 DRI retrofit",
+                capital_cost=h2_retrofit_capital,
+                marginal_cost=h2_retrofit_marginal,
+                p_nom=0,
+                p_nom_max=0,  # set by add_brownfield.py from existing gas DRI capacity
+                p_nom_extendable=True,
+                p_min_pu=0,
+                bus0=nodes + " H2",
+                bus1=spatial.hbi.nodes,
+                efficiency=1 / fuel_input["H2"],
+                lifetime=DRI_lifetimes["H2"],
+            )
+            logger.info(
+                f"Added gas DRI to H2 DRI retrofit links (p_nom_max=0, "
+                f"cost fraction={h2_retrofit_cost_frac:.0%} of greenfield H2 DRI) for all nodes."
+            )
+
+        # Gas DRI 30% H2 blend: existing gas DRI plants that switch part of their
+        # reducing agent to H2 without any capital investment (< 30% H2 blending is
+        # compatible with unmodified MIDREX/HYL reactors).  Capital cost is zero.
+        # p_nom_max=0 here; add_brownfield.py sets it each period from accumulated
+        # gas DRI capacity, so this option only becomes active from 2030 onwards.
+        if cf_industry.get("steel_h2_blend_retrofit", False):
+            h2_blend_frac = cf_industry.get("steel_h2_blend_fraction", 0.30)
+            # Fuel split (energy per tHBI): proportional fractions of each pure route
+            gas_per_tHBI  = (1 - h2_blend_frac) * fuel_input["gas"]   # MWh_gas/tHBI
+            h2_per_tHBI   = h2_blend_frac * fuel_input["H2"]           # MWh_H2/tHBI
+            # CO2 only from the gas fraction; same intensity per MWh_gas as pure gas DRI
+            gas_co2 = costs.at["gas", "CO2 intensity"]  # tCO2/MWh_gas
+            # Ore cost expressed per MWh_gas (primary bus)
+            blend_marginal_cost = DRI_commodity * DRI_ore_input["gas"] / gas_per_tHBI
+
+            n.add(
+                "Link",
+                nodes,
+                suffix=" steel gas DRI H2 blend",
+                carrier="gas DRI H2 blend",
+                capital_cost=0,            # no hardware modification needed
+                marginal_cost=blend_marginal_cost,
+                p_nom=0,
+                p_nom_max=0,               # set by add_brownfield.py
+                p_nom_extendable=True,
+                p_min_pu=0,
+                bus0=spatial.gas.nodes,    # gas consumed (primary, p_nom in MW_gas)
+                bus1=spatial.hbi.nodes,    # HBI produced
+                bus2=nodes + " H2",        # H2 consumed (negative)
+                bus3="co2 atmosphere",     # CO2 emitted (gas portion only)
+                efficiency=1 / gas_per_tHBI,                  # tHBI/MWh_gas
+                efficiency2=-h2_per_tHBI / gas_per_tHBI,      # MWh_H2 consumed per MWh_gas
+                efficiency3=gas_co2,                           # tCO2/MWh_gas
+                lifetime=DRI_lifetimes["gas"],
+            )
+            logger.info(
+                f"Added gas DRI H2 blend links (p_nom_max=0, {h2_blend_frac:.0%} H2 blend, "
+                f"zero capital cost) for all nodes."
+            )
+
+        # Rescale UA steel link capital_cost to use country-specific discount rate.
+        # All capital_cost values above were annualised with the global social discount
+        # rate (2%).  If a UA-specific rate is configured, recompute each UA link's
+        # capital_cost using the country cost dataframe (which was loaded with that rate).
+        if country_specific_costs and "UA" in country_specific_costs:
+            _ua_costs = country_specific_costs["UA"]
+            _ua_node_names = nodes[nodes.str.startswith("UA")]
+            if len(_ua_node_names) > 0:
+                _gas_co2 = costs.at["gas", "CO2 intensity"]
+                _cc_capital = (
+                    costs.at["cement capture", "capital_cost"]
+                    if cf_industry.get("steel_cc")
+                    else 0.0
+                )
+                _ua_rescale = {
+                    " steel H2 DRI": (
+                        _ua_costs.at["hydrogen direct iron reduction furnace", "capital_cost"]
+                        / fuel_input["H2"]
+                    ),
+                    " steel gas DRI": (
+                        _ua_costs.at["natural gas direct iron reduction furnace", "capital_cost"]
+                        / fuel_input["gas"]
+                    ),
+                    " steel gas DRI CC": (
+                        _ua_costs.at["natural gas direct iron reduction furnace", "capital_cost"]
+                        / fuel_input["gas"]
+                        + _cc_capital * _gas_co2
+                    ),
+                    " steel EAF": (
+                        _ua_costs.at["electric arc furnace", "capital_cost"]
+                        / EAF_electricity_input
+                    ),
+                    " steel BF-BOF": (
+                        _ua_costs.at["blast furnace-basic oxygen furnace", "capital_cost"]
+                        / BF_BOF_coal_input
+                    ),
+                }
+                if cf_industry.get("steel_cc") and "steel carbon capture retrofit" in _ua_costs.index:
+                    _cc_el = costs.at["steel carbon capture retrofit", "electricity-input"]
+                    _ua_rescale[" steel BF-BOF CC retrofit"] = (
+                        _ua_costs.at["steel carbon capture retrofit", "capital_cost"] * _cc_el
+                    )
+                for suffix, new_cc in _ua_rescale.items():
+                    _ua_idx = (_ua_node_names + suffix).intersection(n.links.index)
+                    if _ua_idx.empty:
+                        continue
+                    old_cc = n.links.loc[_ua_idx[0], "capital_cost"]
+                    n.links.loc[_ua_idx, "capital_cost"] = new_cc
+                    logger.info(
+                        f"  UA{suffix}: capital_cost {old_cc:.2f} → {new_cc:.2f} EUR/MW/a "
+                        f"(UA country-specific discount rate applied)"
+                    )
+
         # Ukraine greenfield steel: existing BF-BOF as brownfield + greenfield DRI/EAF
         if cf_industry.get("ua_greenfield_steel", False):
-            ua_existing_bfbof_kta = cf_industry["ua_existing_bfbof"]  # kt/a
+            ua_existing_bfbof_kta = cf_industry.get("ua_existing_bfbof", 0)  # kt/a
+            if ua_existing_bfbof_kta == 0:
+                logger.warning("ua_greenfield_steel=True but ua_existing_bfbof not set; assuming 0 kt/a existing BF-BOF")
             ua_nodes_mask = nodes.str.startswith("UA")
             ua_node_names = nodes[ua_nodes_mask]
             base_year = cf_industry.get("_base_year", investment_year)
             is_base_year = (investment_year == base_year)
+            ua_bfbof_retirement_year = cf_industry.get("ua_bfbof_retirement_year", None)
 
             if len(ua_node_names) > 0:
                 logger.info(
                     f"Ukraine greenfield steel ({investment_year}, "
                     f"{'base year' if is_base_year else 'brownfield year'}): "
-                    f"{ua_existing_bfbof_kta} kt/a existing BF-BOF, "
-                    "new DRI/EAF capacity determined by optimizer."
+                    f"{ua_existing_bfbof_kta} kt/a existing BF-BOF"
+                    + (f", retirement year={ua_bfbof_retirement_year}" if ua_bfbof_retirement_year else "")
+                    + ", new DRI/EAF capacity determined by optimizer."
                 )
 
                 # --- DRI routes: greenfield for UA (p_nom=0, extendable=True) ---
-                for suffix in [" steel H2 DRI", " steel gas DRI"]:
+                for suffix in [" steel H2 DRI", " steel gas DRI", " steel gas DRI CC"]:
                     ua_link_names = ua_node_names + suffix
                     ua_link_idx = ua_link_names.intersection(n.links.index)
                     if not ua_link_idx.empty:
@@ -5118,24 +5364,26 @@ def add_industry(
                 # --- BF-BOF: existing capacity in base year only ---
                 # In subsequent years, set p_nom=0 so brownfield carries the
                 # existing BF-BOF from the base year (avoids accumulation).
+                # If ua_bfbof_retirement_year is set, BF-BOF is forcibly retired
+                # in that year by setting build_year so that build_year + lifetime <= year.
                 ua_bfbof_names = ua_node_names + " steel BF-BOF"
                 ua_bfbof_idx = ua_bfbof_names.intersection(n.links.index)
+
+                # Pre-compute demand shares (needed by base year and retirement)
+                ua_steel_keys = ua_node_names + " steel"
+                ua_steel_demand = steel.reindex(ua_steel_keys).fillna(0)
+                ua_total_demand = ua_steel_demand.sum()
+                if ua_total_demand > 0:
+                    ua_shares = (ua_steel_demand / ua_total_demand).values
+                else:
+                    ua_shares = np.full(len(ua_node_names), 1.0 / len(ua_node_names))
+
+                # Compute BF-BOF capacity in standard units (needed for CC and DRI retrofit caps)
+                ua_existing_t_h = ua_existing_bfbof_kta * 1e3 * nyears / nhours
+
                 if not ua_bfbof_idx.empty:
                     if is_base_year:
                         # Base year: set existing BF-BOF capacity
-                        # Convert existing capacity: kt/a -> t/h
-                        ua_existing_t_h = ua_existing_bfbof_kta * 1e3 * nyears / nhours
-
-                        # Distribute proportionally to each UA node's steel demand share
-                        ua_steel_keys = ua_node_names + " steel"
-                        ua_steel_demand = steel.reindex(ua_steel_keys).fillna(0)
-                        ua_total_demand = ua_steel_demand.sum()
-
-                        if ua_total_demand > 0:
-                            ua_shares = (ua_steel_demand / ua_total_demand).values
-                        else:
-                            ua_shares = np.full(len(ua_node_names), 1.0 / len(ua_node_names))
-
                         # p_nom in coal input terms (MW_coal) = t_steel/h * MWh_coal/t_steel
                         ua_bfbof_capacity = pd.Series(
                             ua_shares * ua_existing_t_h * BF_BOF_coal_input,
@@ -5143,10 +5391,69 @@ def add_industry(
                         )
                         n.links.loc[ua_bfbof_idx, "p_nom"] = ua_bfbof_capacity.loc[ua_bfbof_idx]
                         n.links.loc[ua_bfbof_idx, "p_nom_extendable"] = False
-                        logger.info(
-                            f"  Base year: {len(ua_bfbof_idx)} UA BF-BOF links set to fixed "
-                            f"{ua_existing_bfbof_kta} kt/a ({ua_existing_t_h:.1f} t/h total)"
-                        )
+
+                        # If retirement year is configured, set build_year so brownfield retires
+                        # the BF-BOF at the right time: build_year = retirement_year - lifetime
+                        if ua_bfbof_retirement_year is not None:
+                            forced_build_year = ua_bfbof_retirement_year - BF_BOF_lifetime
+                            n.links.loc[ua_bfbof_idx, "build_year"] = forced_build_year
+                            logger.info(
+                                f"  Base year: {len(ua_bfbof_idx)} UA BF-BOF links set to fixed "
+                                f"{ua_existing_bfbof_kta} kt/a ({ua_existing_t_h:.1f} t/h total), "
+                                f"build_year={forced_build_year} → retires in {ua_bfbof_retirement_year}"
+                            )
+                        else:
+                            logger.info(
+                                f"  Base year: {len(ua_bfbof_idx)} UA BF-BOF links set to fixed "
+                                f"{ua_existing_bfbof_kta} kt/a ({ua_existing_t_h:.1f} t/h total)"
+                            )
+
+                        # Limit BF-BOF CC retrofit p_nom_max to the CO2 output of existing BF-BOF.
+                        # CO2 rate [tCO2/h] = t_steel/h × MWh_coal/t_steel × tCO2/MWh_coal
+                        # p_nom_max in MW_el = tCO2/h × MWh_el/tCO2 (because bus0 is electricity)
+                        if cf_industry["steel_cc"]:
+                            CC_el_input_local = costs.at["steel carbon capture retrofit", "electricity-input"]
+                            coal_co2_intensity = costs.at["coal", "CO2 intensity"]  # tCO2/MWh_coal
+                            ua_bfbof_co2_rate = pd.Series(
+                                ua_shares * ua_existing_t_h * BF_BOF_coal_input * coal_co2_intensity,
+                                index=ua_bfbof_names,  # tCO2/h per node
+                            )
+                            ua_cc_names = ua_node_names + " steel BF-BOF CC retrofit"
+                            ua_cc_idx = ua_cc_names.intersection(n.links.index)
+                            if not ua_cc_idx.empty:
+                                # Convert tCO2/h → MW_el for p_nom_max
+                                ua_cc_pnom_max = (
+                                    ua_bfbof_co2_rate
+                                    .rename(index=lambda x: x.replace(" BF-BOF", " BF-BOF CC retrofit"))
+                                    * CC_el_input_local
+                                )
+                                n.links.loc[ua_cc_idx, "p_nom_max"] = ua_cc_pnom_max.reindex(ua_cc_idx).values
+                                logger.info(
+                                    f"  Base year: UA BF-BOF CC retrofit p_nom_max set to "
+                                    f"{ua_cc_pnom_max.sum():.1f} MW_el total "
+                                    f"(based on {ua_bfbof_co2_rate.sum():.1f} tCO2/h BF-BOF CO2 output)"
+                                )
+
+                        # Set BF-BOF → DRI retrofit p_nom_max based on existing BF-BOF steel output.
+                        # Existing BF-BOF produces ua_existing_t_h t_steel/h per node.
+                        # Retrofit DRI needs fuel_input["gas"] MWh_gas per t_HBI,
+                        # and each t_steel needs EAF_hbi_input t_HBI.
+                        # So p_nom_max (MW_gas) = t_steel/h × EAF_hbi_input × fuel_input["gas"]
+                        if cf_industry.get("steel_retrofit_dri", False):
+                            ua_retrofit_names = ua_node_names + " steel BF-BOF to DRI retrofit"
+                            ua_retrofit_idx = ua_retrofit_names.intersection(n.links.index)
+                            if not ua_retrofit_idx.empty:
+                                ua_retrofit_pnom_max = pd.Series(
+                                    ua_shares * ua_existing_t_h * EAF_hbi_input * fuel_input["gas"],
+                                    index=ua_retrofit_names,
+                                )
+                                n.links.loc[ua_retrofit_idx, "p_nom_max"] = ua_retrofit_pnom_max.reindex(ua_retrofit_idx).values
+                                logger.info(
+                                    f"  Base year: UA BF-BOF→DRI retrofit p_nom_max set to "
+                                    f"{ua_retrofit_pnom_max.sum():.1f} MW_gas total "
+                                    f"(converts {ua_existing_t_h:.1f} t_steel/h of BF-BOF capacity)"
+                                )
+
                     else:
                         # Subsequent years: no new BF-BOF (brownfield carries existing)
                         n.links.loc[ua_bfbof_idx, "p_nom"] = 0
@@ -5156,12 +5463,31 @@ def add_industry(
                             "p_nom=0 (existing capacity carried by brownfield)"
                         )
 
-                # --- EAF: greenfield for UA (p_nom=0, extendable already True) ---
+                # --- EAF: existing capacity for UA if configured, otherwise greenfield ---
                 ua_eaf_names = ua_node_names + " steel EAF"
                 ua_eaf_idx = ua_eaf_names.intersection(n.links.index)
                 if not ua_eaf_idx.empty:
-                    n.links.loc[ua_eaf_idx, "p_nom"] = 0
-                    logger.info(f"  {len(ua_eaf_idx)} UA EAF links reset to greenfield (p_nom=0)")
+                    ua_existing_eaf_kta = cf_industry.get("ua_existing_eaf", 0)  # kt/a
+                    if ua_existing_eaf_kta > 0 and is_base_year:
+                        # Convert existing EAF capacity: kt/a -> t/h -> MW_el
+                        ua_eaf_t_h = ua_existing_eaf_kta * 1e3 * nyears / nhours
+                        # Distribute proportionally to each UA node's steel demand share
+                        ua_eaf_capacity = pd.Series(
+                            ua_shares * ua_eaf_t_h * EAF_electricity_input,
+                            index=ua_eaf_names,
+                        )
+                        n.links.loc[ua_eaf_idx, "p_nom"] = ua_eaf_capacity.loc[ua_eaf_idx]
+                        logger.info(
+                            f"  Base year: {len(ua_eaf_idx)} UA EAF links set to "
+                            f"{ua_existing_eaf_kta} kt/a existing ({ua_eaf_t_h:.1f} t/h total), "
+                            "extendable=True for additional greenfield capacity"
+                        )
+                    else:
+                        n.links.loc[ua_eaf_idx, "p_nom"] = 0
+                        if is_base_year:
+                            logger.info(f"  {len(ua_eaf_idx)} UA EAF links reset to greenfield (p_nom=0)")
+                        else:
+                            logger.info(f"  {len(ua_eaf_idx)} UA EAF links set to p_nom=0 (brownfield carries existing)")
 
     n.add(
         "Bus",
@@ -7075,9 +7401,9 @@ if __name__ == "__main__":
 
     investment_year = int(snakemake.wildcards.planning_horizons)
 
-    # Pass base year for greenfield steel logic (needed to avoid brownfield accumulation)
-    if cf_industry.get("ua_greenfield_steel", False):
-        cf_industry["_base_year"] = int(snakemake.params.planning_horizons[0])
+    # Pass base year to add_industry for brownfield accumulation prevention (non-extendable links
+    # must get p_nom=0 in non-base years so brownfield carries only one vintage of capacity).
+    cf_industry["_base_year"] = int(snakemake.params.planning_horizons[0])
 
     n = pypsa.Network(snakemake.input.network)
 

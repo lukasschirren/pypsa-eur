@@ -155,6 +155,260 @@ def add_brownfield(
             n.links.loc[gas_pipes_i, "p_nom"] = remaining_capacity
             n.links.loc[gas_pipes_i, "p_nom_max"] = remaining_capacity
 
+    # --- BF-BOF → gas DRI retrofit: set p_nom_max from existing BF-BOF capacity ---
+    # Same brownfield issue as CC retrofit: fresh BF-BOF p_nom=0 in 2030+, so the
+    # p_nom_max computed in prepare_sector_network is also 0.  Recompute here from
+    # the accumulated brownfield BF-BOF capacity.
+    # Conversion (MW_coal → MW_gas):
+    #   p_nom_max_gas = p_nom_bfbof × eff_bfbof × EAF_hbi_input / eff_dri_ret
+    #   where EAF_hbi_input = -eff2_eaf / eff_eaf
+    dri_ret_i = n.links[
+        (n.links.carrier == "BF-BOF to DRI retrofit")
+        & (n.links.build_year == year)
+    ].index
+
+    if not dri_ret_i.empty:
+        existing_bfbof_dri_i = n.links[
+            (n.links.carrier == "BF-BOF")
+            & (n.links.build_year != year)
+        ].index
+
+        if not existing_bfbof_dri_i.empty:
+            eff_bfbof = n.links.loc[existing_bfbof_dri_i, "efficiency"].iloc[0]
+            eff_dri_ret = n.links.loc[dri_ret_i, "efficiency"].iloc[0]
+
+            eaf_i = n.links[n.links.carrier == "EAF"].index
+            eff_eaf = n.links.loc[eaf_i, "efficiency"].iloc[0]
+            eff2_eaf = n.links.loc[eaf_i, "efficiency2"].iloc[0]
+            eaf_hbi_input = -eff2_eaf / eff_eaf  # tHBI consumed per t_steel
+
+            conversion = eff_bfbof * eaf_hbi_input / eff_dri_ret
+
+            # Group existing BF-BOF by node (strip " steel" from bus1)
+            pnom_by_node = (
+                n.links.loc[existing_bfbof_dri_i]
+                .assign(node=lambda df: df["bus1"].str.replace(r" steel$", "", regex=True))
+                .groupby("node")["p_nom"]
+                .sum()
+            )
+            # DRI retrofit bus1 = HBI node ("X HBI") → strip " HBI" to get node
+            dri_node = n.links.loc[dri_ret_i, "bus1"].str.replace(r" HBI$", "", regex=True)
+            new_pnom_max = dri_node.map(pnom_by_node).fillna(0) * conversion
+            n.links.loc[dri_ret_i, "p_nom_max"] = new_pnom_max.values
+
+            logger.info(
+                f"BF-BOF→DRI retrofit: set p_nom_max for {len(dri_ret_i)} links "
+                f"(total {new_pnom_max.sum():.1f} MW_gas from "
+                f"{pnom_by_node.sum():.1f} MW_coal existing BF-BOF, "
+                f"conversion={conversion:.4f})"
+            )
+        else:
+            logger.info(
+                "BF-BOF→DRI retrofit: no existing BF-BOF from previous periods; "
+                "p_nom_max remains 0."
+            )
+
+    # --- BF-BOF CC retrofit: set p_nom_max from existing BF-BOF capacity ---
+    # New-period CC retrofit links are born with p_nom_max=0 because the fresh
+    # BF-BOF link in prepare_sector_network has p_nom=0 (brownfield fix).
+    # Here we raise p_nom_max to match the CO2 output of accumulated BF-BOF.
+    # Conversion: p_nom_max_CC (MW_el) = p_nom_bfbof (MW_coal) × coal_CO2 × el_input_CC
+    cc_retrofit_i = n.links[
+        (n.links.carrier == "BF-BOF CC retrofit")
+        & (n.links.build_year == year)
+    ].index
+
+    if not cc_retrofit_i.empty:
+        existing_bfbof_i = n.links[
+            (n.links.carrier == "BF-BOF")
+            & (n.links.build_year != year)
+        ].index
+
+        if not existing_bfbof_i.empty:
+            # CC efficiency = CC_capture_rate / CC_el_input; BF-BOF efficiency2 = coal_CO2
+            coal_co2 = n.links.loc[existing_bfbof_i, "efficiency2"].iloc[0]   # tCO2/MWh_coal
+            cc_eff2 = n.links.loc[cc_retrofit_i, "efficiency2"].iloc[0]       # tCO2_removed/MWh_el (negative)
+            # p_nom_max_CC = p_nom_bfbof × coal_co2 / (-cc_eff2)
+            # = p_nom_bfbof × coal_co2 × (CC_el_input / CC_capture_rate)
+            conversion = coal_co2 / (-cc_eff2)
+
+            # Sum existing BF-BOF p_nom grouped by node (strip " steel" from bus1).
+            # BF-BOF bus0 is the single global "EU coal" bus, so we must use bus1
+            # (per-node steel bus e.g. "DE0 0 steel") to get per-node capacity.
+            pnom_by_node = (
+                n.links.loc[existing_bfbof_i]
+                .assign(node=lambda df: df["bus1"].str.replace(r" steel$", "", regex=True))
+                .groupby("node")["p_nom"]
+                .sum()
+            )
+
+            # CC retrofit bus0 is the per-node electricity bus (== node name).
+            cc_bus0 = n.links.loc[cc_retrofit_i, "bus0"]  # electricity bus = node
+            new_pnom_max = cc_bus0.map(pnom_by_node).fillna(0) * conversion
+
+            # Subtract already-installed CC from prior vintages so cumulative CC
+            # cannot exceed BF-BOF CO2 capacity (mirrors gas DRI→H2 DRI pattern).
+            already_cc_i = n.links[
+                (n.links.carrier == "BF-BOF CC retrofit")
+                & (n.links.build_year != year)
+            ].index
+            if not already_cc_i.empty:
+                already_by_node = (
+                    n.links.loc[already_cc_i]
+                    .groupby("bus0")["p_nom"]  # bus0 = per-node electricity bus
+                    .sum()
+                )
+                new_pnom_max = (
+                    new_pnom_max - cc_bus0.map(already_by_node).fillna(0)
+                ).clip(lower=0)
+
+            n.links.loc[cc_retrofit_i, "p_nom_max"] = new_pnom_max.values
+
+            logger.info(
+                f"BF-BOF CC retrofit: set p_nom_max for {len(cc_retrofit_i)} links "
+                f"(total {new_pnom_max.sum():.1f} MW_el from "
+                f"{pnom_by_node.sum():.1f} MW_coal existing BF-BOF, "
+                f"conversion={conversion:.4f})"
+            )
+        else:
+            logger.info(
+                "BF-BOF CC retrofit: no existing BF-BOF from previous periods; "
+                "p_nom_max remains 0."
+            )
+
+    # --- Gas DRI → H2 DRI retrofit: set p_nom_max from existing gas DRI capacity ---
+    # New retrofit links (created in this period) have p_nom_max=0 from
+    # prepare_sector_network.  We raise it to match the gas DRI capacity
+    # carried forward from previous periods, after converting MW_gas → MW_H2
+    # so that the retrofit can produce the same HBI output.
+    retrofit_h2_i = n.links[
+        (n.links.carrier == "gas DRI to H2 DRI retrofit")
+        & (n.links.build_year == year)
+    ].index
+
+    if not retrofit_h2_i.empty:
+        # Existing gas DRI from previous periods (fixed by brownfield)
+        existing_gas_dri_i = n.links[
+            (n.links.carrier == "gas DRI")
+            & (n.links.build_year != year)
+        ].index
+
+        if not existing_gas_dri_i.empty:
+            # Unit conversion: same HBI throughput requires different MW on
+            # each fuel bus.  efficiency = 1/fuel_input, so
+            # p_nom_H2 = p_nom_gas × eff_gas / eff_H2 = p_nom_gas × fuel_H2/fuel_gas
+            gas_dri_eff = n.links.loc[existing_gas_dri_i, "efficiency"].iloc[0]
+            h2_retrofit_eff = n.links.loc[retrofit_h2_i, "efficiency"].iloc[0]
+            conversion = gas_dri_eff / h2_retrofit_eff  # fuel_input["H2"] / fuel_input["gas"]
+
+            # Sum existing gas DRI p_nom grouped by bus1 (HBI bus = node identity)
+            pnom_by_hbi = (
+                n.links.loc[existing_gas_dri_i]
+                .groupby("bus1")["p_nom"]
+                .sum()
+            )
+
+            # Subtract already-installed retrofit capacity from earlier periods so
+            # cumulative retrofits cannot exceed the original gas DRI plant capacity.
+            already_retrofitted_i = n.links[
+                (n.links.carrier == "gas DRI to H2 DRI retrofit")
+                & (n.links.build_year != year)
+            ].index
+            if not already_retrofitted_i.empty:
+                already_by_hbi = (
+                    n.links.loc[already_retrofitted_i]
+                    .groupby("bus1")["p_nom"]
+                    .sum()
+                ) / conversion  # convert MW_H2 → MW_gas to subtract in gas-DRI units
+            else:
+                already_by_hbi = pd.Series(dtype=float)
+
+            # Map each retrofit link to its HBI bus and set p_nom_max
+            retrofit_hbi = n.links.loc[retrofit_h2_i, "bus1"]
+            available_gas_cap = (
+                pnom_by_hbi - already_by_hbi.reindex(pnom_by_hbi.index).fillna(0)
+            ).clip(lower=0)
+            new_pnom_max = retrofit_hbi.map(available_gas_cap).fillna(0) * conversion
+            n.links.loc[retrofit_h2_i, "p_nom_max"] = new_pnom_max.values
+
+            logger.info(
+                f"Gas DRI→H2 DRI retrofit: set p_nom_max for {len(retrofit_h2_i)} links "
+                f"(total {new_pnom_max.sum():.1f} MW_H2 from "
+                f"{pnom_by_hbi.sum():.1f} MW_gas existing gas DRI minus "
+                f"{already_by_hbi.sum():.1f} MW_gas already retrofitted, "
+                f"conversion factor={conversion:.4f})"
+            )
+        else:
+            logger.info(
+                "Gas DRI→H2 DRI retrofit: no existing gas DRI from previous periods; "
+                "p_nom_max remains 0."
+            )
+
+    # --- Gas DRI H2 blend: set p_nom_max from existing gas DRI capacity ---
+    # The 30% H2 blend option can only run where gas DRI plants already exist.
+    # Conversion: running the same tHBI throughput in blend mode consumes only
+    # (1 - h2_blend_frac) × fuel_input["gas"] MW_gas, so:
+    #   p_nom_max_blend = p_nom_gas × (eff_gas_dri / eff_blend) = p_nom_gas × (1 - h2_blend_frac)
+    blend_i = n.links[
+        (n.links.carrier == "gas DRI H2 blend")
+        & (n.links.build_year == year)
+    ].index
+
+    if not blend_i.empty:
+        existing_gas_dri_i = n.links[
+            (n.links.carrier == "gas DRI")
+            & (n.links.build_year != year)
+        ].index
+
+        if not existing_gas_dri_i.empty:
+            gas_dri_eff = n.links.loc[existing_gas_dri_i, "efficiency"].iloc[0]
+            blend_eff = n.links.loc[blend_i, "efficiency"].iloc[0]
+            # conversion = eff_gas_dri / eff_blend = gas_per_tHBI / fuel_input["gas"] = (1 - h2_blend_frac)
+            conversion = gas_dri_eff / blend_eff
+
+            pnom_by_hbi = (
+                n.links.loc[existing_gas_dri_i]
+                .groupby("bus1")["p_nom"]
+                .sum()
+            )
+
+            # Deduct gas DRI capacity already permanently converted to pure H2
+            # via the gas DRI → H2 DRI retrofit.  Once a plant runs on 100% H2
+            # it can no longer operate in gas-H2 blend mode.
+            # Conversion: p_nom_H2_retrofit (MW_H2) → MW_gas equivalent
+            #   MW_gas = MW_H2 / (gas_dri_eff / h2ret_eff)
+            already_h2ret_i = n.links[
+                (n.links.carrier == "gas DRI to H2 DRI retrofit")
+                & (n.links.build_year != year)
+            ].index
+            if not already_h2ret_i.empty:
+                h2ret_eff = n.links.loc[already_h2ret_i, "efficiency"].iloc[0]
+                gas_to_h2_conv = gas_dri_eff / h2ret_eff  # fuel_H2/fuel_gas (MW_H2 per MW_gas)
+                already_h2ret_by_hbi = (
+                    n.links.loc[already_h2ret_i].groupby("bus1")["p_nom"].sum()
+                ) / gas_to_h2_conv  # MW_H2 → MW_gas equivalent
+                pnom_by_hbi = (
+                    pnom_by_hbi
+                    - already_h2ret_by_hbi.reindex(pnom_by_hbi.index).fillna(0)
+                ).clip(lower=0)
+
+            blend_hbi = n.links.loc[blend_i, "bus1"]
+            new_pnom_max = blend_hbi.map(pnom_by_hbi).fillna(0) * conversion
+            n.links.loc[blend_i, "p_nom_max"] = new_pnom_max.values
+
+            logger.info(
+                f"Gas DRI H2 blend: set p_nom_max for {len(blend_i)} links "
+                f"(total {new_pnom_max.sum():.1f} MW_gas from "
+                f"{pnom_by_hbi.sum():.1f} MW_gas available gas DRI "
+                f"(after deducting already-H2-retrofitted), "
+                f"conversion={conversion:.4f})"
+            )
+        else:
+            logger.info(
+                "Gas DRI H2 blend: no existing gas DRI from previous periods; "
+                "p_nom_max remains 0."
+            )
+
 
 def disable_grid_expansion_if_limit_hit(n):
     """

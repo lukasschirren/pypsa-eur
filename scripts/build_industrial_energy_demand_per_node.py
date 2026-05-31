@@ -62,12 +62,27 @@ if __name__ == "__main__":
     nodal_production_stacked = nodal_production.stack()
     nodal_production_stacked.index.names = [None, None]
 
+    nodal_full = nodal_sector_ratios.multiply(nodal_production_stacked)
+
+    # When endogenous_steel is enabled, the primary-steel routes ("DRI + Electric arc"
+    # and "Integrated steelworks") are modelled as Links in prepare_sector_network and
+    # consume their fuels endogenously. Drop their sector columns here so the same
+    # H2 / coal / methane / electricity is not also added as a fixed industrial Load.
+    # "Electric arc" (secondary scrap-EAF) is kept because it is not modelled endogenously.
+    industry_params = snakemake.params.industry
+    endogenous_sectors = []
+    if industry_params.get("endogenous_steel", False):
+        endogenous_sectors += ["DRI + Electric arc", "Integrated steelworks"]
+    if endogenous_sectors:
+        keep = ~nodal_full.columns.get_level_values(1).isin(endogenous_sectors)
+        nodal_full = nodal_full.loc[:, keep]
+        logger.info(
+            f"endogenous_steel=True → dropped sectors {endogenous_sectors} from "
+            "industrial energy demand to avoid double counting with endogenous Links."
+        )
+
     # final energy consumption per node and industry (TWh/a)
-    nodal_df = (
-        (nodal_sector_ratios.multiply(nodal_production_stacked))
-        .T.groupby(level=0)
-        .sum()
-    )
+    nodal_df = nodal_full.T.groupby(level=0).sum()
 
     rename_sectors = {
         "elec": "electricity",
