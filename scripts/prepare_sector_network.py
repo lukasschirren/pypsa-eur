@@ -1520,6 +1520,8 @@ def add_generation(
     options: dict,
     cf_industry: dict,
     conventional_params: dict = None,
+    unit_commitment_df: pd.DataFrame = None,
+    country_extendable_carriers: dict = None,
 ) -> None:
     """
     Add conventional electricity generation to the network.
@@ -1626,6 +1628,33 @@ def add_generation(
                     # Single float value for all
                     n.links.loc[link_names, "p_max_pu"] = p_max_pu_value
                     logger.info(f"Applied p_max_pu={p_max_pu_value} for {generator}")
+
+        # Apply country-specific extendability restrictions for Links added here
+        if country_extendable_carriers:
+            link_names = nodes + " " + generator
+            for link_name in link_names:
+                # node names are like "UA_Western", "DE0 0" – country = first 2 chars
+                country = link_name[:2]
+                if country in country_extendable_carriers:
+                    allowed = country_extendable_carriers[country].get("Generator", [])
+                    if generator not in allowed:
+                        n.links.loc[link_name, "p_nom_extendable"] = False
+                        logger.info(
+                            f"country_extendable_carriers: {country} - {generator} (Link) set to non-extendable"
+                        )
+
+        # Apply unit commitment constraints (ramp limits, p_min_pu) from CSV
+        # These work with p_nom_extendable=True without requiring committable=True
+        if unit_commitment_df is not None and generator in unit_commitment_df.columns:
+            link_names = nodes + " " + generator
+            uc = unit_commitment_df[generator]
+            if "ramp_limit_up" in uc.index and pd.notna(uc["ramp_limit_up"]):
+                n.links.loc[link_names, "ramp_limit_up"] = float(uc["ramp_limit_up"])
+                n.links.loc[link_names, "ramp_limit_down"] = float(uc["ramp_limit_up"])
+                logger.info(f"Applied ramp_limit_up/down={uc['ramp_limit_up']} for {generator} Links")
+            if "p_min_pu" in uc.index and pd.notna(uc["p_min_pu"]):
+                n.links.loc[link_names, "p_min_pu"] = float(uc["p_min_pu"])
+                logger.info(f"Applied p_min_pu={uc['p_min_pu']} for {generator} Links")
 
 
 def add_ammonia(
@@ -7541,6 +7570,12 @@ if __name__ == "__main__":
         options=options,
         cf_industry=cf_industry,
         conventional_params=snakemake.params.get("conventional", {}),
+        unit_commitment_df=(
+            pd.read_csv(snakemake.input.unit_commitment, index_col=0)
+            if hasattr(snakemake.input, "unit_commitment")
+            else None
+        ),
+        country_extendable_carriers=snakemake.params.get("country_extendable_carriers", {}),
     )
 
     add_storage_and_grids(
@@ -7769,6 +7804,42 @@ if __name__ == "__main__":
         n, snakemake.params.get("interconnection_capacity_override", {}),
         investment_year=investment_year,
     )
+
+    # ── Enforce country_extendable_carriers on ALL CO2-emitting Links ──
+    # This is a post-processing safety net that catches every fossil/CO2-emitting
+    # Link added by any function (add_generation, add_methanol_to_power, SMR, etc.)
+    country_extendable_carriers = snakemake.params.get("country_extendable_carriers", {})
+    if country_extendable_carriers:
+        # Identify Links that connect to "co2 atmosphere" on any bus
+        bus_cols = [c for c in n.links.columns if c.startswith("bus") and c != "bus0"]
+        co2_mask = pd.Series(False, index=n.links.index)
+        for col in bus_cols:
+            co2_mask |= n.links[col].eq("co2 atmosphere")
+        co2_links = n.links.loc[co2_mask & n.links.p_nom_extendable]
+
+        for country, restrictions in country_extendable_carriers.items():
+            allowed = set(restrictions.get("Generator", []))
+            # Match links belonging to this country (link names start with country code)
+            idx = co2_links.index.str
+            country_mask = idx.startswith(country + "_") | idx.startswith(country + " ")
+            country_co2_links = co2_links.loc[country_mask]
+
+            for link_name in country_co2_links.index:
+                carrier = n.links.loc[link_name, "carrier"]
+                # Skip industrial process links (steel) — managed by industry config,
+                # not by the power-sector country_extendable_carriers restriction
+                if carrier.startswith("steel") or carrier in (
+                    "H2 DRI", "gas DRI", "gas DRI CC", "EAF", "BF-BOF",
+                    "BF-BOF CC retrofit", "BF-BOF to DRI retrofit",
+                    "gas DRI to H2 DRI retrofit", "gas DRI H2 blend",
+                ):
+                    continue
+                if carrier not in allowed:
+                    n.links.loc[link_name, "p_nom_extendable"] = False
+                    logger.info(
+                        f"country_extendable_carriers enforcement: "
+                        f"{link_name} ({carrier}) set to non-extendable"
+                    )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
 

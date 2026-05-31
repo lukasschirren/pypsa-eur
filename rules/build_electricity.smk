@@ -757,7 +757,9 @@ rule add_electricity:
         regions=resources("regions_onshore_base_s_{clusters}.geojson"),
         powerplants=resources("powerplants_s_{clusters}.csv"),
         hydro_capacities=ancient("data/hydro_capacities.csv"),
-        unit_commitment="data/unit_commitment.csv",
+        unit_commitment=lambda w: config_provider(
+            "conventional", "unit_commitment_file", default="data/unit_commitment.csv"
+        )(w),
         fuel_price=lambda w: (
             resources("monthly_fuel_price.csv")
             if config_provider("conventional", "dynamic_fuel_price")(w)

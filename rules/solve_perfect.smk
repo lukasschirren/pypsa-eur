@@ -30,6 +30,7 @@ rule add_existing_baseyear:
         ),
         existing_heating="data/existing_infrastructure/existing_heating_raw.csv",
         heating_efficiencies=resources("heating_efficiencies.csv"),
+        unit_commitment="data/unit_commitment.csv",
     output:
         resources(
             "networks/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}_brownfield.nc"

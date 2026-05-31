@@ -356,12 +356,21 @@ def load_costs(
             costs.loc[overwrites.index, attr] = overwrites
             logger.info(f"Overwriting {attr} with:\n{overwrites}")
 
+    social_premium = config["social_discountrate"]
     if country is not None:
-        country_discount_rate = get_country_discount_rate(country, config)
-        costs["discount rate"] = country_discount_rate
-        logger.info(f"Using country-specific discount rate for {country}: {country_discount_rate:.1%}")
+        base_rate = get_country_discount_rate(country, config)
+        costs["discount rate"] = base_rate + social_premium
+        logger.info(
+            f"Country {country}: WACC = base {base_rate:.2%} "
+            f"+ social premium {social_premium:.2%} = {base_rate + social_premium:.2%}"
+        )
     else:
-        costs["discount rate"] = config["social_discountrate"]
+        base_rate = config["fill_values"]["discount rate"]
+        costs["discount rate"] = base_rate + social_premium
+        logger.info(
+            f"Default WACC = base {base_rate:.2%} "
+            f"+ social premium {social_premium:.2%} = {base_rate + social_premium:.2%}"
+        )
 
     annuity_factor = calculate_annuity(costs["lifetime"], costs["discount rate"])
     annuity_factor_fom = annuity_factor + costs["FOM"] / 100.0
@@ -890,7 +899,7 @@ def attach_conventional_generators(
     if unit_commitment is not None:
         committable_attrs = ppl.carrier.isin(unit_commitment).to_frame("committable")
         for attr in unit_commitment.index:
-            default = n.component_attrs["Generator"].loc[attr, "default"]
+            default = n.components["Generator"].defaults.loc[attr, "default"]
             committable_attrs[attr] = ppl.carrier.map(unit_commitment.loc[attr]).fillna(
                 default
             )
@@ -968,8 +977,14 @@ def attach_conventional_generators(
                     {attr: n.generators.loc[idx].bus.map(bus_values).dropna()}
                 )
             else:
-                # Single value affecting all generators of technology k indiscriminantely of country
-                n.generators.loc[idx, attr] = values
+                if isinstance(values, dict):
+                    # Dict of country-specific values — map generators via their bus country
+                    values_series = pd.Series(values)
+                    bus_values = n.buses.country.map(values_series)
+                    n.generators.loc[idx, attr] = n.generators.loc[idx, "bus"].map(bus_values)
+                else:
+                    # Single value affecting all generators of technology k indiscriminantely of country
+                    n.generators.loc[idx, attr] = values
 
 
 def attach_hydro(
@@ -1489,6 +1504,33 @@ def attach_stores(
         )
 
 
+def cap_ua_renewable_distribution(n, carriers=None):
+    """Cap each UA zone's p_nom_max to the mean across all UA zones per carrier.
+
+    Models decentralised renewable investment where no single zone dominates.
+    Zones below the mean are unaffected; zones above are scaled down proportionally.
+    """
+    if carriers is None:
+        carriers = ["solar", "onwind", "offwind-ac", "offwind-dc"]
+    for carrier in carriers:
+        mask = (n.generators.carrier == carrier) & n.generators.bus.str.startswith("UA")
+        ua_gens = n.generators[mask]
+        if ua_gens.empty:
+            continue
+        bus_potential = ua_gens.groupby("bus")["p_nom_max"].sum()
+        mean_potential = bus_potential.mean()
+        logger.info(
+            f"UA {carrier}: zone p_nom_max [{bus_potential.min():.0f}, "
+            f"{bus_potential.max():.0f}] MW, capping at mean={mean_potential:.0f} MW"
+        )
+        for bus, total in bus_potential.items():
+            if total <= mean_potential:
+                continue
+            scale = mean_potential / total
+            gen_mask = mask & (n.generators.bus == bus)
+            n.generators.loc[gen_mask, "p_nom_max"] *= scale
+
+
 if __name__ == "__main__":
     if "snakemake" not in globals():
         from scripts._helpers import mock_snakemake
@@ -1543,6 +1585,14 @@ if __name__ == "__main__":
         params.aggregation_strategies,
         params.exclude_carriers,
     )
+
+    ua_exclude_regions = getattr(params, "ua_exclude_regions", []) or []
+    if ua_exclude_regions:
+        before = len(ppl)
+        ppl = ppl[~ppl.bus.isin(ua_exclude_regions)]
+        logger.info(
+            f"Excluded {before - len(ppl)} powerplant(s) in regions: {ua_exclude_regions}"
+        )
 
     attach_load(
         n,
@@ -1604,6 +1654,10 @@ if __name__ == "__main__":
         params.line_length_factor,
         landfall_lengths,
     )
+
+    if params.electricity.get("ua_equal_renewable_distribution", False):
+        logger.info("Capping UA renewable p_nom_max to equal distribution across zones...")
+        cap_ua_renewable_distribution(n)
 
     if "hydro" in renewable_carriers:
         p = params.renewable["hydro"]

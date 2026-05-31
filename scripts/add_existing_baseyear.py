@@ -156,6 +156,7 @@ def add_power_capacities_installed_before_baseyear(
     lifetime_values: dict[str, float],
     renewable_carriers: list[str],
     conventional_params: dict | None = None,
+    unit_commitment_df: pd.DataFrame = None,
 ) -> None:
     """
     Add power generation capacities installed before base year.
@@ -182,6 +183,8 @@ def add_power_capacities_installed_before_baseyear(
         List of renewable carriers in the network
     conventional_params : dict, optional
         Conventional generation parameters including p_max_pu settings
+    unit_commitment_df : pd.DataFrame, optional
+        Unit commitment data (ramp_limit_up, p_min_pu, etc.) per carrier
     """
     logger.debug(f"Adding power capacities installed before {baseyear}")
 
@@ -383,6 +386,16 @@ def add_power_capacities_installed_before_baseyear(
                         p_max_pu_values = p_max_pu_source
                     n.links.loc[already_build, "p_max_pu"] = p_max_pu_values
 
+                # Apply p_min_pu from conventional_params to already-built Links
+                if (
+                    conventional_params is not None
+                    and generator in conventional_params
+                    and "p_min_pu" in conventional_params[generator]
+                ):
+                    n.links.loc[already_build, "p_min_pu"] = float(
+                        conventional_params[generator]["p_min_pu"]
+                    )
+
             if not new_build.empty:
                 new_capacity = capacity.loc[new_build.str.replace(name_suffix, "")]
 
@@ -411,6 +424,14 @@ def add_power_capacities_installed_before_baseyear(
                             f"Applied p_max_pu to existing {generator} Links"
                         )
 
+                    p_min_pu_value = 0.0  # default
+                    if (
+                        conventional_params is not None
+                        and generator in conventional_params
+                        and "p_min_pu" in conventional_params[generator]
+                    ):
+                        p_min_pu_value = float(conventional_params[generator]["p_min_pu"])
+
                     n.add(
                         "Link",
                         new_capacity.index,
@@ -431,12 +452,22 @@ def add_power_capacities_installed_before_baseyear(
                         build_year=grouping_year,
                         lifetime=lifetime_assets.loc[new_capacity.index],
                         p_max_pu=p_max_pu_value,
+                        p_min_pu=p_min_pu_value,
                     )
                 else:
                     key = "central solid biomass CHP"
                     central_heat = n.buses.query(
                         "carrier == 'urban central heat'"
                     ).location.unique()
+
+                    if not len(central_heat):
+                        logger.info(
+                            "No urban central heat buses found. "
+                            "Skipping existing solid biomass CHP addition "
+                            "(heating or biomass sector likely disabled)."
+                        )
+                        continue
+
                     heat_buses = new_capacity.index.map(
                         lambda i: i + " urban central heat" if i in central_heat else ""
                     )
@@ -802,6 +833,11 @@ if __name__ == "__main__":
 
     grouping_years_power = snakemake.params.existing_capacities["grouping_years_power"]
     grouping_years_heat = snakemake.params.existing_capacities["grouping_years_heat"]
+    # Read unit commitment data if available
+    unit_commitment_df = None
+    if hasattr(snakemake.input, "unit_commitment"):
+        unit_commitment_df = pd.read_csv(snakemake.input.unit_commitment, index_col=0)
+
     add_power_capacities_installed_before_baseyear(
         n=n,
         costs=costs,
@@ -813,6 +849,7 @@ if __name__ == "__main__":
         lifetime_values=snakemake.params.costs["fill_values"],
         renewable_carriers=renewable_carriers,
         conventional_params=snakemake.params.get("conventional", None),
+        unit_commitment_df=unit_commitment_df,
     )
 
     if options["heating"]:

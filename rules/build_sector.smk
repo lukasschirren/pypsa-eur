@@ -1288,6 +1288,7 @@ rule prepare_sector_network:
         adjustments=config_provider("adjustments", "sector"),
         transmission_capacity_adjustment=config_provider("transmission_capacity_adjustment", default={}),
         interconnection_capacity_override=config_provider("interconnection_capacity_override", default=[]),
+        country_extendable_carriers=config_provider("electricity", "country_extendable_carriers", default={}),
         emissions_scope=config_provider("energy", "emissions"),
         biomass=config_provider("biomass"),
         load=config_provider("load"),
@@ -1427,6 +1428,7 @@ rule prepare_sector_network:
             if config_provider("sector", "district_heating", "ates", "enable")(w)
             else []
         ),
+        unit_commitment="data/unit_commitment.csv",
     output:
         resources(
             "networks/base_s_{clusters}_{opts}_{sector_opts}_{planning_horizons}.nc"
