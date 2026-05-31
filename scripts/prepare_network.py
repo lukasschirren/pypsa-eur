@@ -387,6 +387,87 @@ def enforce_autarky(n, only_crossborder=False):
     n.remove("Link", links_rm)
 
 
+def override_interconnection_capacities(n, override_config, investment_year=None):
+    """
+    Override cross-border interconnection capacities with absolute MW values.
+    Mirrors the same function in prepare_sector_network.py so the electricity
+    pipeline can also apply UA interconnection overrides.
+    """
+    if not override_config:
+        return
+
+    if isinstance(override_config, list):
+        overrides = override_config
+        apply_years = []
+    else:
+        apply_years = override_config.get("apply_years", [])
+        overrides = override_config.get("overrides", [])
+
+    if not overrides:
+        return
+
+    if apply_years and investment_year is not None:
+        if investment_year not in apply_years:
+            logger.info(
+                f"Skipping interconnection capacity overrides: "
+                f"year {investment_year} not in apply_years {apply_years}"
+            )
+            return
+
+    logger.info(
+        f"Applying {len(overrides)} interconnection capacity overrides "
+        f"(year={investment_year})"
+    )
+
+    for entry in overrides:
+        b0 = entry.get("bus0")
+        b1 = entry.get("bus1")
+        s_nom = entry.get("s_nom")
+        p_nom = entry.get("p_nom")
+
+        if b0 is None or b1 is None:
+            logger.warning(f"  Skipping override with missing bus0/bus1: {entry}")
+            continue
+
+        if s_nom is not None and not n.lines.empty:
+            mask = (
+                ((n.lines.bus0 == b0) & (n.lines.bus1 == b1))
+                | ((n.lines.bus0 == b1) & (n.lines.bus1 == b0))
+            )
+            if mask.any():
+                old_val = n.lines.loc[mask, "s_nom"].values
+                n.lines.loc[mask, "s_nom"] = s_nom
+                n.lines.loc[mask, "s_nom_min"] = s_nom
+                if "s_nom_max" in n.lines.columns:
+                    n.lines.loc[mask, "s_nom_max"] = n.lines.loc[
+                        mask, "s_nom_max"
+                    ].clip(lower=s_nom)
+                logger.info(
+                    f"  AC line {b0} <-> {b1}: {old_val} -> {s_nom} MW ({mask.sum()} line(s))"
+                )
+            else:
+                logger.warning(f"  No AC line found for {b0} <-> {b1}")
+
+        if p_nom is not None and not n.links.empty:
+            mask = (
+                ((n.links.bus0 == b0) & (n.links.bus1 == b1))
+                | ((n.links.bus0 == b1) & (n.links.bus1 == b0))
+            )
+            if mask.any():
+                old_val = n.links.loc[mask, "p_nom"].values
+                n.links.loc[mask, "p_nom"] = p_nom
+                n.links.loc[mask, "p_nom_min"] = p_nom
+                if "p_nom_max" in n.links.columns:
+                    n.links.loc[mask, "p_nom_max"] = n.links.loc[
+                        mask, "p_nom_max"
+                    ].clip(lower=p_nom)
+                logger.info(
+                    f"  DC link {b0} <-> {b1}: {old_val} -> {p_nom} MW ({mask.sum()} link(s))"
+                )
+            else:
+                logger.warning(f"  No DC link found for {b0} <-> {b1}")
+
+
 def set_line_nom_max(
     n,
     s_nom_max_set=np.inf,
@@ -496,6 +577,11 @@ if __name__ == "__main__":
     if snakemake.params.autarky["enable"]:
         only_crossborder = snakemake.params.autarky["by_country"]
         enforce_autarky(n, only_crossborder=only_crossborder)
+
+    override_interconnection_capacities(
+        n,
+        snakemake.params.get("interconnection_capacity_override", {}),
+    )
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
     n.export_to_netcdf(snakemake.output[0])

@@ -804,6 +804,7 @@ rule prepare_network:
         autarky=config_provider("electricity", "autarky", default={}),
         drop_leap_day=config_provider("enable", "drop_leap_day"),
         transmission_limit=config_provider("electricity", "transmission_limit"),
+        interconnection_capacity_override=config_provider("interconnection_capacity_override", default={}),
     input:
         resources("networks/base_s_{clusters}_elec.nc"),
         tech_costs=lambda w: resources(
