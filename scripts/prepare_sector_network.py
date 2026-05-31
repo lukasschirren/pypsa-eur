@@ -852,7 +852,7 @@ def add_eu_bus(n, x=-5.5, y=46):
     n.add("Carrier", "none")
 
 
-def add_co2_tracking(n, costs, options, country_specific_costs=None, sequestration_potential_file=None):
+def add_co2_tracking(n, costs, options, country_specific_costs=None, sequestration_potential_file=None, co2_price=0.0):
     """
     Add CO2 tracking components to the network including atmospheric CO2,
     CO2 storage, and sequestration infrastructure.
@@ -876,6 +876,9 @@ def add_co2_tracking(n, costs, options, country_specific_costs=None, sequestrati
     sequestration_potential_file : str, optional
         Path to CSV file containing regional CO2 sequestration potentials.
         Required if options['regional_co2_sequestration_potential']['enable'] is True.
+    co2_price : float, optional
+        Exogenous CO2 price (EUR/tCO2). Applied as negative marginal_cost on
+        the CO2 atmosphere store so that emitters pay and removers earn.
 
     Returns
     -------
@@ -905,6 +908,7 @@ def add_co2_tracking(n, costs, options, country_specific_costs=None, sequestrati
         e_min_pu=-1,
         carrier="co2",
         bus="co2 atmosphere",
+        marginal_cost=-co2_price,
     )
 
     # add CO2 tanks
@@ -7511,12 +7515,21 @@ if __name__ == "__main__":
 
     add_eu_bus(n)
 
+    emission_prices = snakemake.params.costs.get("emission_prices", {})
+    if emission_prices.get("enable", False):
+        co2_price_config = emission_prices.get("co2_price_path", emission_prices.get("co2", 0.0))
+        co2_price = get(co2_price_config, investment_year)
+    else:
+        co2_price = 0.0
+    logger.info(f"CO2 emission price for {investment_year}: {co2_price} EUR/tCO2")
+
     add_co2_tracking(
         n,
         costs,
         options,
         country_specific_costs=country_specific_costs,
         sequestration_potential_file=snakemake.input.sequestration_potential,
+        co2_price=co2_price,
     )
 
     add_generation(
