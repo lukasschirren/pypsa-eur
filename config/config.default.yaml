@@ -392,6 +392,7 @@ load:
   scaling_factor: 1.0
   fixed_year: false
   supplement_synthetic: true
+  ua_electricity_demand: 109.8 # TWh, scales UA demand from 2018 baseline (154.81 TWh)
   distribution_key:
     gdp: 0.6
     population: 0.4

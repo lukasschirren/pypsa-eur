@@ -352,5 +352,17 @@ if __name__ == "__main__":
 
     demand.fillna(0.0, inplace=True)
 
+    # Zero out EU-average-based sectors for Ukraine.
+    # These are estimated by scaling EU27 JRC-IDEES physical output by energy
+    # ratios, which does not reflect actual Ukrainian industrial production.
+    # Steel and ammonia are kept as they have Ukraine-specific data/overrides.
+    if "UA" in demand.index:
+        keep_sectors = ["Electric arc", "Integrated steelworks", "Ammonia"]
+        zero_sectors = [col for col in demand.columns if col not in keep_sectors]
+        demand.loc["UA", zero_sectors] = 0.0
+        logger.info(
+            "Zeroed EU-average-based sectors for UA. Kept: %s", keep_sectors
+        )
+
     fn = snakemake.output.industrial_production_per_country
     demand.to_csv(fn, float_format="%.2f")

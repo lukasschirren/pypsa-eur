@@ -661,6 +661,9 @@ rule cluster_network:
         length_factor=config_provider("lines", "length_factor"),
         cluster_mode=config_provider("clustering", "mode"),
         copperplate_regions=config_provider("clustering", "copperplate_regions"),
+        ua_exclude_regions=config_provider(
+            "clustering", "ua_exclude_regions", default=[]
+        ),
     input:
         unpack(input_custom_busmap),
         network=resources("networks/base_s.nc"),
@@ -746,6 +749,9 @@ rule add_electricity:
         ),
         aggregation_strategies=config_provider("clustering", "aggregation_strategies"),
         exclude_carriers=config_provider("clustering", "exclude_carriers"),
+        ua_exclude_regions=config_provider(
+            "clustering", "ua_exclude_regions", default=[]
+        ),
     input:
         unpack(input_profile_tech),
         unpack(input_class_regions),

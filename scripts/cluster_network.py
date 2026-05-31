@@ -688,7 +688,16 @@ if __name__ == "__main__":
             # Load Ukraine custom shapes
             ukraine_shapes = gpd.read_file(snakemake.input.ukraine_shapes)
             logger.info(f"Loaded custom Ukraine shapes from {snakemake.input.ukraine_shapes}")
-            
+
+            ua_exclude = params.get("ua_exclude_regions", [])
+            if ua_exclude:
+                before = len(ukraine_shapes)
+                ukraine_shapes = ukraine_shapes[~ukraine_shapes["name"].isin(ua_exclude)]
+                logger.info(
+                    f"Excluded {before - len(ukraine_shapes)} UA region(s): {ua_exclude}. "
+                    f"Buses in excluded regions will be reassigned to nearest remaining zone."
+                )
+
             # Standard setup
             n_clusters = int(snakemake.wildcards.clusters)
             algorithm = params.cluster_network["algorithm"]

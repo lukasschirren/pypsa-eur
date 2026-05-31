@@ -282,6 +282,14 @@ if __name__ == "__main__":
         ua_scaling_factor = ua_demand_twh / 154.81
         logger.info(f"Scaling UA demand to {ua_demand_twh} TWh (factor: {ua_scaling_factor:.4f})")
         load["UA"] = load_ua * ua_scaling_factor
+        ua_peak_cap = snakemake.params.load.get("ua_peak_demand_cap_mw")
+        if ua_peak_cap is not None:
+            n_hours_clipped = (load["UA"] > ua_peak_cap).sum()
+            logger.info(
+                f"Capping UA peak demand at {ua_peak_cap} MW "
+                f"(raw peak: {load['UA'].max():.0f} MW, hours clipped: {n_hours_clipped})"
+            )
+            load["UA"] = load["UA"].clip(upper=ua_peak_cap)
         # attach load of MD (no time-series available, use 2020-totals and distribute according to UA):
         # https://www.iea.org/data-and-statistics/data-browser/?country=MOLDOVA&fuel=Energy%20consumption&indicator=TotElecCons
         if "MD" in countries:

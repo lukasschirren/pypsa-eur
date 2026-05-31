@@ -157,6 +157,7 @@ def add_power_capacities_installed_before_baseyear(
     renewable_carriers: list[str],
     conventional_params: dict | None = None,
     unit_commitment_df: pd.DataFrame = None,
+    exclude_buses: list | None = None,
 ) -> None:
     """
     Add power generation capacities installed before base year.
@@ -189,6 +190,13 @@ def add_power_capacities_installed_before_baseyear(
     logger.debug(f"Adding power capacities installed before {baseyear}")
 
     df_agg = pd.read_csv(powerplants_file, index_col=0)
+
+    if exclude_buses:
+        before = len(df_agg)
+        df_agg = df_agg[~df_agg.bus.isin(exclude_buses)]
+        logger.info(
+            f"Excluded {before - len(df_agg)} powerplant(s) in buses: {exclude_buses}"
+        )
 
     rename_fuel = {
         "Hard Coal": "coal",
@@ -850,6 +858,7 @@ if __name__ == "__main__":
         renewable_carriers=renewable_carriers,
         conventional_params=snakemake.params.get("conventional", None),
         unit_commitment_df=unit_commitment_df,
+        exclude_buses=snakemake.params.get("ua_exclude_regions", []) or [],
     )
 
     if options["heating"]:
