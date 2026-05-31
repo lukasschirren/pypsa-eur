@@ -41,15 +41,28 @@ def input_custom_powerplants(w):
     return "data/custom_powerplants.csv"
 
 
+def input_powerplants_csv(w):
+    """
+    If electricity.powerplants_csv is set to a CSV path, use it as a direct
+    input so Snakemake tracks the dependency.
+    """
+    ppl_csv = config_provider("electricity", "powerplants_csv")(w)
+    if isinstance(ppl_csv, str) and ppl_csv.endswith(".csv"):
+        return ppl_csv
+    return []
+
+
 rule build_powerplants:
     params:
         powerplants_filter=config_provider("electricity", "powerplants_filter"),
         custom_powerplants=config_provider("electricity", "custom_powerplants"),
         everywhere_powerplants=config_provider("electricity", "everywhere_powerplants"),
         countries=config_provider("countries"),
+        powerplants_csv=config_provider("electricity", "powerplants_csv"),
     input:
         network=resources("networks/base_s_{clusters}.nc"),
         custom_powerplants=input_custom_powerplants,
+        powerplants_csv=input_powerplants_csv,
     output:
         resources("powerplants_s_{clusters}.csv"),
     log:

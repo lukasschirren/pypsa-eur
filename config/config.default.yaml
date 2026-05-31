@@ -146,6 +146,7 @@ electricity:
   powerplants_filter: (DateOut >= 2024 or DateOut != DateOut) and not (Country == 'Germany' and Fueltype == 'Nuclear')
   custom_powerplants: false
   everywhere_powerplants: []
+  powerplants_csv: false  # Set to a path (e.g. "data/powerplants_s_50.csv") to bypass the build_powerplants pipeline entirely
 
   conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass, uranium]
   renewable_carriers: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, hydro]

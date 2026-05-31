@@ -154,60 +154,69 @@ if __name__ == "__main__":
     configure_logging(snakemake)
     set_scenario_config(snakemake)
 
-    n = pypsa.Network(snakemake.input.network)
-    countries = snakemake.params.countries
+    # Short-circuit: if a pre-built powerplants CSV is provided, just copy it
+    powerplants_csv = snakemake.params.get("powerplants_csv", False)
+    if isinstance(powerplants_csv, str) and powerplants_csv.endswith(".csv"):
+        import shutil
 
-    ppl = (
-        pm.powerplants(from_url=True)
-        .powerplant.fill_missing_decommissioning_years()
-        .powerplant.convert_country_to_alpha2()
-        .query('Fueltype not in ["Solar", "Wind"] and Country in @countries')
-        .assign(Technology=replace_natural_gas_technology)
-        .assign(Fueltype=replace_natural_gas_fueltype)
-        .replace({"Solid Biomass": "Bioenergy", "Biogas": "Bioenergy"})
-    )
+        logger.info(f"Using pre-built powerplants CSV: {powerplants_csv}")
+        shutil.copy(powerplants_csv, snakemake.output[0])
+        logger.info(f"Copied to {snakemake.output[0]}")
+    else:
+        n = pypsa.Network(snakemake.input.network)
+        countries = snakemake.params.countries
 
-    # Correct bioenergy for countries where possible
-    opsd = pm.data.OPSD_VRE().powerplant.convert_country_to_alpha2()
-    opsd = opsd.replace({"Solid Biomass": "Bioenergy", "Biogas": "Bioenergy"}).query(
-        'Country in @countries and Fueltype == "Bioenergy"'
-    )
-    opsd["Name"] = "Biomass"
-    available_countries = opsd.Country.unique()
-    ppl = ppl.query('not (Country in @available_countries and Fueltype == "Bioenergy")')
-    ppl = pd.concat([ppl, opsd])
-
-    ppl_query = snakemake.params.powerplants_filter
-    if isinstance(ppl_query, str):
-        ppl.query(ppl_query, inplace=True)
-
-    # add carriers from own powerplant files:
-    custom_ppl_query = snakemake.params.custom_powerplants
-    ppl = add_custom_powerplants(
-        ppl, snakemake.input.custom_powerplants, custom_ppl_query
-    )
-
-    if countries_wo_ppl := set(countries) - set(ppl.Country.unique()):
-        logger.warning(f"No powerplants known in: {', '.join(countries_wo_ppl)}")
-
-    # Add "everywhere powerplants" to all bus locations
-    ppl = add_everywhere_powerplants(
-        ppl, n.buses, snakemake.params.everywhere_powerplants
-    )
-
-    ppl = ppl.dropna(subset=["lat", "lon"])
-    ppl = map_country_bus(ppl, n.buses)
-
-    bus_null_b = ppl["bus"].isnull()
-    if bus_null_b.any():
-        logger.warning(
-            f"Couldn't find close bus for {bus_null_b.sum()} powerplants. "
-            "Removing them from the powerplants list."
+        ppl = (
+            pm.powerplants(from_url=True)
+            .powerplant.fill_missing_decommissioning_years()
+            .powerplant.convert_country_to_alpha2()
+            .query('Fueltype not in ["Solar", "Wind"] and Country in @countries')
+            .assign(Technology=replace_natural_gas_technology)
+            .assign(Fueltype=replace_natural_gas_fueltype)
+            .replace({"Solid Biomass": "Bioenergy", "Biogas": "Bioenergy"})
         )
-        ppl = ppl[~bus_null_b]
 
-    # TODO: This has to fixed in PPM, some powerplants are still duplicated
-    cumcount = ppl.groupby(["bus", "Fueltype"]).cumcount() + 1
-    ppl.Name = ppl.Name.where(cumcount == 1, ppl.Name + " " + cumcount.astype(str))
+        # Correct bioenergy for countries where possible
+        opsd = pm.data.OPSD_VRE().powerplant.convert_country_to_alpha2()
+        opsd = opsd.replace({"Solid Biomass": "Bioenergy", "Biogas": "Bioenergy"}).query(
+            'Country in @countries and Fueltype == "Bioenergy"'
+        )
+        opsd["Name"] = "Biomass"
+        available_countries = opsd.Country.unique()
+        ppl = ppl.query('not (Country in @available_countries and Fueltype == "Bioenergy")')
+        ppl = pd.concat([ppl, opsd])
 
-    ppl.reset_index(drop=True).to_csv(snakemake.output[0])
+        ppl_query = snakemake.params.powerplants_filter
+        if isinstance(ppl_query, str):
+            ppl.query(ppl_query, inplace=True)
+
+        # add carriers from own powerplant files:
+        custom_ppl_query = snakemake.params.custom_powerplants
+        ppl = add_custom_powerplants(
+            ppl, snakemake.input.custom_powerplants, custom_ppl_query
+        )
+
+        if countries_wo_ppl := set(countries) - set(ppl.Country.unique()):
+            logger.warning(f"No powerplants known in: {', '.join(countries_wo_ppl)}")
+
+        # Add "everywhere powerplants" to all bus locations
+        ppl = add_everywhere_powerplants(
+            ppl, n.buses, snakemake.params.everywhere_powerplants
+        )
+
+        ppl = ppl.dropna(subset=["lat", "lon"])
+        ppl = map_country_bus(ppl, n.buses)
+
+        bus_null_b = ppl["bus"].isnull()
+        if bus_null_b.any():
+            logger.warning(
+                f"Couldn't find close bus for {bus_null_b.sum()} powerplants. "
+                "Removing them from the powerplants list."
+            )
+            ppl = ppl[~bus_null_b]
+
+        # TODO: This has to fixed in PPM, some powerplants are still duplicated
+        cumcount = ppl.groupby(["bus", "Fueltype"]).cumcount() + 1
+        ppl.Name = ppl.Name.where(cumcount == 1, ppl.Name + " " + cumcount.astype(str))
+
+        ppl.reset_index(drop=True).to_csv(snakemake.output[0])
