@@ -28,16 +28,16 @@
 #   conventional_carriers: [nuclear, oil, OCGT, CCGT, coal, lignite, geothermal, biomass, uranium]
 #   renewable_carriers: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, hydro]
 
-post_war_y_5: 
-  electricity:
-    extendable_carriers:
-      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
-      StorageUnit: [] # battery, H2
-      Store: [battery, H2]
-      Link: [] # H2 pipeline
+# post_war_y_4: 
+#   electricity:
+#     extendable_carriers:
+#       Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
+#       StorageUnit: [] # battery, H2
+#       Store: [battery, H2]
+#       Link: [] # H2 pipeline
 
 
-post_war_y_4:
+post_war_y_3:
 
   electricity:
     extendable_carriers:
@@ -46,11 +46,11 @@ post_war_y_4:
       Store: [battery, H2]
       Link: [] # H2 pipeline
     # Year 4: Ukraine - solar, wind, gas (no nuclear, coal, hydro)
-    country_extendable_carriers:
-      UA:
-        Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT]
+    # country_extendable_carriers:
+    #   UA:
+    #     Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT]
 
-post_war_y_3:
+post_war_y_2:
 
   electricity:
     extendable_carriers:
@@ -62,21 +62,7 @@ post_war_y_3:
     # Year 3: Ukraine - solar, wind only (no gas, nuclear, coal, hydro)
     country_extendable_carriers:
       UA:
-        Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float]
-
-post_war_y_2:
-  
-  electricity:
-    extendable_carriers:
-      Generator: [solar, solar-hsat, onwind, offwind-ac, offwind-dc, offwind-float, OCGT, CCGT, nuclear, coal, lignite, oil, uranium]
-      StorageUnit: [] # battery, H2
-      Store: [battery, H2]
-      Link: [] # H2 pipeline
-
-    # Year 2: Ukraine - solar, wind onshore only 
-    country_extendable_carriers:
-      UA:
-        Generator: [solar, solar-hsat, onwind]
+        Generator: [solar, solar-hsat, onwind, OCGT, CCGT]
 
 post_war_y_1:
   
@@ -90,4 +76,4 @@ post_war_y_1:
     # Year 1: Ukraine - solar only (most restricted)
     country_extendable_carriers:
       UA:
-        Generator: [solar, solar-hsat]
+        Generator: [solar, solar-hsat, OCGT, CCGT]
